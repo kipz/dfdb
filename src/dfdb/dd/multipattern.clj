@@ -64,7 +64,7 @@
        (= 1 (count patterns))
        (simple/make-simple-pipeline (first patterns) find-vars)
 
-      ;; Two patterns - incremental join
+      ;; Exactly two patterns - incremental join
        (= 2 (count patterns))
        (let [pattern1 (first patterns)
              pattern2 (second patterns)

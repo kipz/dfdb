@@ -16,6 +16,7 @@
             channel               ; core.async channel (if delivery = :core-async)
             watch-dimensions      ; Which time dimensions trigger updates
             see-retroactive?      ; Whether to see historical updates
+            transform-fn          ; Optional transformation function (fn [diff] ...)
             current-results       ; Atom holding current result set
             active?])             ; Atom - is subscription active?
 
@@ -31,7 +32,7 @@
   "Create a new subscription."
   [db config]
   (let [sub-id (swap! subscription-counter inc)
-        {:keys [query mode callback delivery watch-dimensions see-retroactive?]
+        {:keys [query mode callback delivery watch-dimensions see-retroactive? transform-fn]
          :or {mode :incremental
               delivery :callback
               watch-dimensions [:time/system]
@@ -58,6 +59,7 @@
                        :channel channel
                        :watch-dimensions watch-dimensions
                        :see-retroactive? see-retroactive?
+                       :transform-fn transform-fn
                        :current-results (atom initial-results)
                        :active? (atom true)
                        :dd-graph dd-graph})]  ; Store DD graph if available
@@ -66,8 +68,11 @@
     (swap! subscriptions assoc sub-id subscription)
 
     ;; Deliver initial state
-    (let [initial-diff {:additions initial-results
-                        :retractions #{}}]
+    (let [raw-initial-diff {:additions initial-results
+                            :retractions #{}}
+          initial-diff (if transform-fn
+                         (transform-fn raw-initial-diff)
+                         raw-initial-diff)]
       (case delivery
         :callback (when callback (callback initial-diff))
         :core-async (async/>!! channel initial-diff)
@@ -86,26 +91,45 @@
                         {:query (:query-form subscription)})))
 
       ;; TRUE DIFFERENTIAL - NO FALLBACK
-      (let [old-results-raw ((:get-results dd-graph))
-            old-results (if (set? old-results-raw) old-results-raw (set old-results-raw))
+      (try
+        (let [old-results-raw ((:get-results dd-graph))
+              old-results (if (set? old-results-raw) old-results-raw (set old-results-raw))
 
-            _ ((:process-deltas dd-graph) deltas)
+              _ (try
+                  ((:process-deltas dd-graph) deltas)
+                  (catch Exception e
+                    (throw (ex-info "Error in process-deltas"
+                                    {:subscription-id (:id subscription)
+                                     :query (:query-form subscription)
+                                     :error (.getMessage e)}
+                                    e))))
 
-            new-results-raw ((:get-results dd-graph))
-            new-results (if (set? new-results-raw) new-results-raw (set new-results-raw))
+              new-results-raw ((:get-results dd-graph))
+              new-results (if (set? new-results-raw) new-results-raw (set new-results-raw))
 
-            additions (clojure.set/difference new-results old-results)
-            retractions (clojure.set/difference old-results new-results)
-            diff {:additions additions :retractions retractions}]
+              additions (clojure.set/difference new-results old-results)
+              retractions (clojure.set/difference old-results new-results)
+              raw-diff {:additions additions :retractions retractions}
 
-        ;; Deliver diff if non-empty
-        (when (or (seq additions) (seq retractions))
-          (case (:delivery subscription)
-            :callback (when-let [cb (:callback subscription)]
-                        (cb diff))
-            :core-async (when-let [ch (:channel subscription)]
-                          (async/>!! ch diff))
-            :manifold nil))))))
+              ;; Apply transformation if provided
+              diff (if-let [transform (:transform-fn subscription)]
+                     (transform raw-diff)
+                     raw-diff)]
+
+          ;; Deliver diff if non-empty
+          (when (or (seq (:additions diff)) (seq (:retractions diff)))
+            (case (:delivery subscription)
+              :callback (when-let [cb (:callback subscription)]
+                          (cb diff))
+              :core-async (when-let [ch (:channel subscription)]
+                            (async/>!! ch diff))
+              :manifold nil)))
+        (catch Exception e
+          (throw (ex-info "Error in notify-subscription"
+                          {:subscription-id (:id subscription)
+                           :query (:query-form subscription)
+                           :error (.getMessage e)}
+                          e)))))))
 
 (defn notify-all-subscriptions
   "Notify all active subscriptions of transaction deltas."
@@ -114,13 +138,13 @@
     (when @(:active? subscription)
       (try
         ;; Check if any delta dimensions match watch-dimensions
-        (let [delta-dims (set (mapcat (fn [delta]
-                                        (when (map? delta)  ; Ensure delta is a map
-                                          (filter #(and (keyword? %)
-                                                        (namespace %)
-                                                        (.startsWith (namespace %) "time"))
-                                                  (keys delta))))
-                                      deltas))
+        (let [delta-dims (set (for [delta deltas
+                                    :when (map? delta)  ; Ensure delta is a map
+                                    dim-key (keys delta)
+                                    :when (and (keyword? dim-key)
+                                               (namespace dim-key)
+                                               (.startsWith (namespace dim-key) "time"))]
+                                dim-key))
               watch-dims (set (:watch-dimensions subscription))
               should-notify? (seq (set/intersection delta-dims watch-dims))]
           (when should-notify?

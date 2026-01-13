@@ -13,4 +13,11 @@
                       cider/cider-nrepl {:mvn/version "0.47.1"}}}
 
   :dev {:extra-paths ["dev"]
-        :extra-deps {org.clojure/tools.namespace {:mvn/version "1.4.4"}}}}}
+        :extra-deps {org.clojure/tools.namespace {:mvn/version "1.4.4"}}}
+
+  :perf {:extra-deps {criterium/criterium {:mvn/version "0.4.6"}
+                      com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.2.2"}}
+         :jvm-opts ["-Xmx4g" "-Xms4g"
+                    "-XX:+UseG1GC"
+                    "-XX:+UnlockDiagnosticVMOptions"
+                    "-XX:+DebugNonSafepoints"]}}}

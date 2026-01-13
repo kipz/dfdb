@@ -146,10 +146,16 @@
               (let [agg-state @(:aggregates (:state agg-op))
                     latest-timestamp (when (seq agg-state) (apply max (keys agg-state)))
                     aggregates (when latest-timestamp (get agg-state latest-timestamp))
-                    ;; Convert {[customer] sum} to [[customer sum]]
+                    ;; Convert {group-key sum} to result tuples
+                    ;; If no grouping (group-key = :all), result is just [agg-val]
+                    ;; If grouping, result is [group-key... agg-val]
                     agg-results (when aggregates
                                   (map (fn [[group-key agg-val]]
-                                         (vec (concat group-key [agg-val])))
+                                         (if (= :all group-key)
+                                           ;; No grouping - just aggregate value
+                                           [agg-val]
+                                           ;; With grouping - concat group key and agg value
+                                           (vec (concat group-key [agg-val]))))
                                        aggregates))]
                 ;; Reset and feed to collect
                 (reset! (:accumulated (:state collect-agg)) {})
@@ -184,25 +190,6 @@
 ;; =============================================================================
 ;; NOT Clause Support
 ;; =============================================================================
-
-(defrecord NotFilter [not-pattern state]
-  ;; Maintains set of bindings that match the NOT pattern
-  ;; Filters them out
-
-  simple/DeltaOperator
-  (process-delta [_this delta]
-    (let [binding (:binding delta)
-          mult (:mult delta)]
-
-      ;; Update state
-      (swap! (:matches state) update binding (fnil + 0) mult)
-
-      ;; Check if binding would match NOT pattern
-      ;; For now: simple implementation - track all and filter
-      ;; Better: evaluate NOT pattern on the fly
-
-      ;; Pass through for now (proper impl would check NOT pattern)
-      [delta])))
 
 (defn add-not-filter
   "Add NOT clause filtering to pipeline."
