@@ -6,8 +6,8 @@
   TRUE DIFFERENTIAL DATAFLOW - NO RE-EXECUTION:
   - Initial seed: Uses query engine (allowed)
   - Updates: ONLY processes changed edges and affected entities"
-  (:require [dfdb.dd.delta-simple :as delta]
-            [dfdb.dd.simple-incremental :as simple]
+  (:require [dfdb.dd.delta-core :as delta]
+            [dfdb.dd.incremental-core :as core]
             [dfdb.recursive :as recursive]
             [dfdb.index :as index]
             [dfdb.query :as query]
@@ -79,8 +79,8 @@
         edges (atom {})  ; {from -> #{to ...}}
         closure (atom {})  ; {from -> #{reachable ...}}
 
-        project-op (simple/->ProjectOperator find-vars (atom {}))
-        collect-op (simple/->CollectResults {:accumulated (atom {})})]
+        project-op (core/->ProjectOperator find-vars (atom {}))
+        collect-op (core/->CollectResults {:accumulated (atom {})})]
 
     ;; Initialize from database
     (let [all-edges (index/scan-aevt (:storage db) [:aevt base-attr] [:aevt (index/successor-value base-attr)])]
@@ -164,9 +164,9 @@
 
              ;; Project and collect
              (doseq [binding matched-bindings]
-               (let [projected (simple/process-delta project-op (delta/make-delta binding 1))]
+               (let [projected (core/process-delta project-op (delta/make-delta binding 1))]
                  (doseq [p projected]
-                   (simple/process-delta collect-op p))))))
+                   (core/process-delta collect-op p))))))
 
          ;; Emit deltas for removed paths
          (doseq [[src tgt] @removed-paths]
@@ -176,12 +176,12 @@
                  matched-bindings (match-non-recursive-patterns db where-clauses #{closure-binding})]
 
              (doseq [binding matched-bindings]
-               (let [projected (simple/process-delta project-op (delta/make-delta binding -1))]
+               (let [projected (core/process-delta project-op (delta/make-delta binding -1))]
                  (doseq [p projected]
-                   (simple/process-delta collect-op p))))))))
+                   (core/process-delta collect-op p))))))))
 
      :get-results
-     (fn [] (simple/get-results collect-op))
+     (fn [] (core/get-results collect-op))
 
      :operators
      {:edges edges

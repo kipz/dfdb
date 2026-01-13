@@ -1,13 +1,13 @@
 (ns dfdb.dd.multipattern
   "Multi-pattern incremental execution with joins."
-  (:require [dfdb.dd.delta-simple :as delta]
-            [dfdb.dd.simple-incremental :as simple]
+  (:require [dfdb.dd.delta-core :as delta]
+            [dfdb.dd.incremental-core :as core]
             [clojure.set :as set]))
 
 (set! *warn-on-reflection* true)
 
 (defrecord IncrementalJoinOperator [left-state right-state join-vars]
-  simple/DeltaOperator
+  core/DeltaOperator
   (process-delta [_this delta]
     (let [binding (:binding delta)
           mult (:mult delta)
@@ -64,7 +64,7 @@
      (cond
       ;; Single pattern
        (= 1 (count patterns))
-       (simple/make-simple-pipeline (first patterns) find-vars predicate-filters)
+       (core/make-pattern-pipeline (first patterns) find-vars predicate-filters)
 
       ;; Exactly two patterns - simple join
        (= 2 (count patterns))
@@ -74,8 +74,8 @@
              vars2 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern2)
              join-vars (vec (filter (set vars1) vars2))
 
-             pattern-op1 (simple/->PatternOperator pattern1 (atom {}))
-             pattern-op2 (simple/->PatternOperator pattern2 (atom {}))
+             pattern-op1 (core/->PatternOperator pattern1 (atom {}))
+             pattern-op2 (core/->PatternOperator pattern2 (atom {}))
              join-op (make-incremental-join join-vars)
 
              ;; Helper to apply predicate filters to deltas
@@ -83,12 +83,12 @@
                              (if (empty? predicate-filters)
                                deltas
                                (reduce (fn [ds filter-op]
-                                         (mapcat #(simple/process-delta filter-op %) ds))
+                                         (mapcat #(core/process-delta filter-op %) ds))
                                        deltas
                                        predicate-filters)))
 
-             project-op (simple/->ProjectOperator find-vars (atom {}))
-             collect-op (simple/->CollectResults {:accumulated (atom {})})]
+             project-op (core/->ProjectOperator find-vars (atom {}))
+             collect-op (core/->CollectResults {:accumulated (atom {})})]
 
          {:process-deltas
           (fn [tx-deltas]
@@ -96,25 +96,25 @@
                   deltas2 (delta/transaction-deltas-to-binding-deltas tx-deltas pattern2)]
 
               (doseq [d deltas1]
-                (let [pattern-out (simple/process-delta pattern-op1 d)
+                (let [pattern-out (core/process-delta pattern-op1 d)
                       tagged (map #(assoc % :source :left) pattern-out)
-                      joined (mapcat #(simple/process-delta join-op %) tagged)
+                      joined (mapcat #(core/process-delta join-op %) tagged)
                       filtered (apply-filters joined)
-                      projected (mapcat #(simple/process-delta project-op %) filtered)]
+                      projected (mapcat #(core/process-delta project-op %) filtered)]
                   (doseq [p projected]
-                    (simple/process-delta collect-op p))))
+                    (core/process-delta collect-op p))))
 
               (doseq [d deltas2]
-                (let [pattern-out (simple/process-delta pattern-op2 d)
+                (let [pattern-out (core/process-delta pattern-op2 d)
                       tagged (map #(assoc % :source :right) pattern-out)
-                      joined (mapcat #(simple/process-delta join-op %) tagged)
+                      joined (mapcat #(core/process-delta join-op %) tagged)
                       filtered (apply-filters joined)
-                      projected (mapcat #(simple/process-delta project-op %) filtered)]
+                      projected (mapcat #(core/process-delta project-op %) filtered)]
                   (doseq [p projected]
-                    (simple/process-delta collect-op p))))))
+                    (core/process-delta collect-op p))))))
 
           :get-results
-          (fn [] (simple/get-results collect-op))
+          (fn [] (core/get-results collect-op))
 
           :operators
           {:pattern1 pattern-op1
@@ -126,7 +126,7 @@
       ;; Three+ patterns - chain multiple joins
        (> (count patterns) 2)
        (let [;; Build chain: (P1 ⋈ P2) ⋈ P3 ⋈ P4 ...
-             pattern-ops (mapv (fn [p] (simple/->PatternOperator p (atom {}))) patterns)
+             pattern-ops (mapv (fn [p] (core/->PatternOperator p (atom {}))) patterns)
 
             ;; Create join operators for each step
             ;; Join-0: P1 ⋈ P2 on common(P1, P2)
@@ -152,12 +152,12 @@
                              (if (empty? predicate-filters)
                                deltas
                                (reduce (fn [ds filter-op]
-                                         (mapcat #(simple/process-delta filter-op %) ds))
+                                         (mapcat #(core/process-delta filter-op %) ds))
                                        deltas
                                        predicate-filters)))
 
-             project-op (simple/->ProjectOperator find-vars (atom {}))
-             collect-op (simple/->CollectResults {:accumulated (atom {})})]
+             project-op (core/->ProjectOperator find-vars (atom {}))
+             collect-op (core/->CollectResults {:accumulated (atom {})})]
 
          {:process-deltas
           (fn [tx-deltas]
@@ -167,12 +167,12 @@
                     pattern-op (nth pattern-ops idx)]
 
                 (doseq [d pattern-deltas]
-                  (let [pattern-out (simple/process-delta pattern-op d)]
+                  (let [pattern-out (core/process-delta pattern-op d)]
 
                     (if (zero? idx)
                      ;; First pattern - feed to first join's left side
                       (let [tagged (map #(assoc % :source :left) pattern-out)
-                            joined (mapcat #(simple/process-delta (first join-ops) %) tagged)
+                            joined (mapcat #(core/process-delta (first join-ops) %) tagged)
                             ;; Chain through remaining joins on LEFT side (accumulated results)
                             final-deltas
                             (reduce (fn [deltas join-idx]
@@ -180,19 +180,19 @@
                                         (let [join-op (nth join-ops join-idx)
                                               ;; Tag as LEFT - this is the accumulated result
                                               tagged (map #(assoc % :source :left) deltas)]
-                                          (mapcat #(simple/process-delta join-op %) tagged))
+                                          (mapcat #(core/process-delta join-op %) tagged))
                                         deltas))
                                     joined
                                     (range 1 (count join-ops)))
                             filtered (apply-filters final-deltas)
-                            projected (mapcat #(simple/process-delta project-op %) filtered)]
+                            projected (mapcat #(core/process-delta project-op %) filtered)]
                         (doseq [p projected]
-                          (simple/process-delta collect-op p)))
+                          (core/process-delta collect-op p)))
 
                      ;; Later patterns - feed to corresponding join's right side
                       (let [join-idx (dec idx)  ; Pattern 2 goes to join 0's right, Pattern 3 goes to join 1's right, etc.
                             tagged (map #(assoc % :source :right) pattern-out)
-                            joined (mapcat #(simple/process-delta (nth join-ops join-idx) %) tagged)
+                            joined (mapcat #(core/process-delta (nth join-ops join-idx) %) tagged)
                             ;; Chain output through NEXT joins on LEFT side (this is now accumulated)
                             final-deltas
                             (reduce (fn [deltas ji]
@@ -200,17 +200,17 @@
                                         (let [join-op (nth join-ops ji)
                                               ;; Tag as LEFT for next join - accumulated result
                                               tagged (map #(assoc % :source :left) deltas)]
-                                          (mapcat #(simple/process-delta join-op %) tagged))
+                                          (mapcat #(core/process-delta join-op %) tagged))
                                         deltas))
                                     joined
                                     (range (inc join-idx) (count join-ops)))
                             filtered (when final-deltas (apply-filters final-deltas))
-                            projected (when filtered (mapcat #(simple/process-delta project-op %) filtered))]
+                            projected (when filtered (mapcat #(core/process-delta project-op %) filtered))]
                         (doseq [p projected]
-                          (simple/process-delta collect-op p)))))))))
+                          (core/process-delta collect-op p)))))))))
 
           :get-results
-          (fn [] (simple/get-results collect-op))
+          (fn [] (core/get-results collect-op))
 
           :operators
           {:patterns pattern-ops

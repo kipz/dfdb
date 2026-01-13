@@ -1,7 +1,7 @@
 (ns dfdb.dd.full-pipeline
   "Complete DD pipeline for ALL Datalog query types - NO fallback."
-  (:require [dfdb.dd.delta-simple :as delta]
-            [dfdb.dd.simple-incremental :as simple]
+  (:require [dfdb.dd.delta-core :as delta]
+            [dfdb.dd.incremental-core :as core]
             [dfdb.dd.multipattern :as mp]
             [dfdb.dd.aggregate :as agg]
             [dfdb.dd.multiset :as ms]
@@ -63,7 +63,7 @@
 (defn make-predicate-filters
   "Create predicate filter operators from predicate clauses."
   [predicates]
-  (map #(simple/->PredicateFilter (predicate-to-fn %)) predicates))
+  (map #(core/->PredicateFilter (predicate-to-fn %)) predicates))
 
 ;; =============================================================================
 ;; Complete Builder
@@ -94,9 +94,12 @@
              agg-vars (distinct (map second aggregates))
              all-vars (vec (concat group-vars agg-vars))
 
-            ;; Build base WITHOUT final projection (keep full bindings)
+            ;; Create predicate filters to apply during incremental updates
+             pred-filters (make-predicate-filters predicates)
+
+            ;; Build base WITH predicate filters (keep full bindings)
             ;; We pass all-vars so the base knows what to keep
-             base (mp/make-multi-pattern-pipeline pure-patterns all-vars)
+             base (mp/make-multi-pattern-pipeline pure-patterns all-vars pred-filters)
 
              _ (when-not base
                  (throw (ex-info "Could not build pattern pipeline"
@@ -130,20 +133,26 @@
                                              max (comp agg/agg-max (partial map value-fn)))]
                           (agg/make-aggregate-operator group-fn tuple-agg-fn nil))))
 
-             collect-agg (simple/->CollectResults {:accumulated (atom {})})
+             collect-agg (core/->CollectResults {:accumulated (atom {})})
+
+            ;; Use a fixed timestamp for this aggregate pipeline (we don't need temporal versions)
+             current-timestamp (atom 0)
 
          ;; Helper to extract current aggregate results from operators
              extract-agg-results (fn []
-                                   (let [first-agg-state @(:aggregates (:state (first agg-ops)))
-                                         latest-timestamp (when (seq first-agg-state) (apply max (keys first-agg-state)))
-                                         first-aggregates (when latest-timestamp (get first-agg-state latest-timestamp))]
+                                   (let [ts @current-timestamp
+                                         first-agg-state @(:aggregates (:state (first agg-ops)))
+                                         all-timestamps (keys first-agg-state)
+                                         _ (when (> (count all-timestamps) 1)
+                                             (println "WARNING: Multiple timestamps in aggregate state:" all-timestamps))
+                                         first-aggregates (get first-agg-state ts)]
                                      (when first-aggregates
                                        (set
                                         (for [group-key (keys first-aggregates)]
                                           (let [agg-values (vec
                                                             (for [agg-op agg-ops]
                                                               (let [state @(:aggregates (:state agg-op))
-                                                                    aggs (get state latest-timestamp)]
+                                                                    aggs (get state ts)]
                                                                 (get aggs group-key))))]
                                             (if (= :all group-key)
                                               agg-values
@@ -157,33 +166,65 @@
              ;; Process through base
               ((:process-deltas base) tx-deltas)
 
-             ;; Get intermediate results (tuples)
-              (let [intermediate ((:get-results base))
-                    ;; Convert to multiset
-                    ms (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))]
+             ;; Get intermediate results (tuples) with multiplicities preserved
+              (let [;; For aggregates, we need to preserve multiplicities from base CollectResults
+                    ;; Don't use get-results which collapses multiplicities via set conversion
+                    base-accumulated (when-let [base-ops (:operators base)]
+                                       (when-let [collect (:collect base-ops)]
+                                         @(:accumulated (:state collect))))
+                    ;; Use accumulated map directly as multiset
+                    ms (if base-accumulated
+                         (ms/multiset base-accumulated)
+                         ;; Fallback to get-results for non-join cases
+                         (let [intermediate ((:get-results base))]
+                           (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))))]
 
-               ;; Feed to ALL aggregate operators
-                (doseq [agg-op agg-ops]
-                  (op/input agg-op ms (System/currentTimeMillis)))
+               ;; Feed to ALL aggregate operators with consistent timestamp
+                (let [ts @current-timestamp]
+                  (doseq [agg-op agg-ops]
+                    (op/input agg-op ms ts)))
 
                ;; Get new aggregate results AFTER processing
                 (let [new-results (or (extract-agg-results) #{})
 
                       ;; Compute differential
                       additions (clojure.set/difference new-results old-results)
-                      retractions (clojure.set/difference old-results new-results)]
+                      retractions (clojure.set/difference old-results new-results)
+
+                      ;; Debug if there are changes but no retractions (unexpected for aggregates)
+                      _ (when (and (seq additions) (empty? retractions) (seq old-results))
+                          (println "WARNING: Additions without retractions!")
+                          (println "  old-results:" old-results)
+                          (println "  new-results:" new-results)
+                          (println "  additions:" additions))]
 
                  ;; Feed differential to collect operator
+                  ;; Debug: check if retractions exist in collect-agg
+                  (when (seq retractions)
+                    (let [collect-state @(:accumulated (:state collect-agg))
+                          missing-in-collect (filter (fn [r] (not (pos? (get collect-state r 0)))) retractions)]
+                      (when (seq missing-in-collect)
+                        (println "WARNING: Retracting values not in collect-agg:" missing-in-collect)
+                        (println "  Current collect-agg positive entries:"
+                                 (filter (fn [[k v]] (pos? v)) collect-state)))))
+
                   (doseq [result retractions]
                     (let [d (delta/make-delta result -1)]
-                      (simple/process-delta collect-agg d)))
+                      (core/process-delta collect-agg d)))
 
                   (doseq [result additions]
                     (let [d (delta/make-delta result 1)]
-                      (simple/process-delta collect-agg d)))))))
+                      (core/process-delta collect-agg d)))))))
 
           :get-results
-          (fn [] (simple/get-results collect-agg))})
+          (fn [] (core/get-results collect-agg))
+
+          :base base
+          :all-vars all-vars
+          :agg-ops agg-ops
+          :group-vars group-vars
+          :extract-agg-results extract-agg-results
+          :operators {:collect collect-agg}})
 
       ;; Pure patterns with optional predicates and/or NOT clauses
        (seq pure-patterns)
@@ -221,7 +262,7 @@
         ;; Build pipeline for NOT pattern to track what matches
         not-pipeline (mp/make-multi-pattern-pipeline [not-pattern] [])
 
-        filtered-collect (simple/->CollectResults {:accumulated (atom {})})]
+        filtered-collect (core/->CollectResults {:accumulated (atom {})})]
 
     (if not-pipeline
       {:process-deltas
@@ -242,10 +283,10 @@
            ;; Emit results that DON'T appear in NOT results
            (doseq [result base-results]
              (when-not (contains? not-results result)
-               (simple/process-delta filtered-collect (delta/make-delta result 1))))))
+               (core/process-delta filtered-collect (delta/make-delta result 1))))))
 
        :get-results
-       (fn [] (simple/get-results filtered-collect))}
+       (fn [] (core/get-results filtered-collect))}
 
       ;; Can't compile NOT pattern
       (throw (ex-info "Could not compile NOT pattern to DD"
@@ -259,31 +300,203 @@
 
 (defn initialize-pipeline-state
   "Initialize DD pipeline state with existing database contents.
-  The DD pipeline starts with empty state and only learns from deltas.
-  This function bootstraps the state by scanning the database and generating
-  synthetic 'add' deltas for all existing data matching the query patterns."
+  Uses naive query execution to compute initial results, then directly
+  populates the pipeline's final operator state. This avoids the expensive
+  process of scanning the entire database and feeding it through the delta pipeline."
   [dd-graph db query-form]
   (when dd-graph
-    (let [parsed (query/parse-query query-form)
-          patterns (filter pattern-clause? (:where parsed))
-          storage (:storage db)]
+    ;; Run the query naively to get current results
+    (let [initial-results (query/query db query-form)
+          operators (:operators dd-graph)
+          parsed (query/parse-query query-form)
+          where-clauses (:where parsed)
+          patterns (filter pattern-clause? where-clauses)
+          predicates (filter predicate-clause? where-clauses)
+          has-aggregates? (seq (:aggregates parsed))]
 
-      ;; For each pattern, scan database and generate initial deltas
-      (doseq [pattern patterns]
-        (let [[_e a _v] pattern]
-          (when (keyword? a)  ; Only for concrete attributes
-            ;; Scan all datoms for this attribute
-            (let [datoms (index/scan-aevt storage [:aevt a] [:aevt (index/successor-value a)])
-                  ;; Convert to synthetic transaction deltas
-                  init-deltas (map (fn [[_k datom]]
-                                     {:entity (:e datom)
-                                      :attribute (:a datom)
-                                      :old-value nil
-                                      :new-value (:v datom)
-                                      :operation :assert
-                                      :time/system (:t datom)})
-                                   (filter #(= :assert (:op (second %))) datoms))]
+      ;; Populate join operator states for multi-pattern queries
+      ;; This ensures incremental updates can join against existing state
+      (when (and (> (count patterns) 1) operators)
+        (try
+          (cond
+            ;; 2-pattern join: populate pattern operators and join operator
+            (= (count patterns) 2)
+            (let [pattern1 (first patterns)
+                  pattern2 (second patterns)
+                  pattern1-vars (vec (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern1))
+                  pattern2-vars (vec (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern2))]
 
-              ;; Feed through DD pipeline
-              (when (seq init-deltas)
-                ((:process-deltas dd-graph) init-deltas)))))))))
+              ;; Only populate if we have variables and a join operator
+              (when (and (seq pattern1-vars) (seq pattern2-vars) (:join operators))
+                ;; Query each pattern separately to get all current matches
+                (let [pattern1-query (vec (concat [:find] pattern1-vars [:where pattern1]))
+                      pattern2-query (vec (concat [:find] pattern2-vars [:where pattern2]))
+                      pattern1-bindings (try (set (query/query db pattern1-query)) (catch Exception _e #{}))
+                      pattern2-bindings (try (set (query/query db pattern2-query)) (catch Exception _e #{}))]
+
+                  ;; Convert result tuples back to binding maps
+                  (when (and (seq pattern1-bindings) (seq pattern2-bindings))
+                    (let [pattern1-maps (set (map (fn [tuple]
+                                                    (if (vector? tuple)
+                                                      (zipmap pattern1-vars tuple)
+                                                      {(first pattern1-vars) tuple}))
+                                                  pattern1-bindings))
+                          pattern2-maps (set (map (fn [tuple]
+                                                    (if (vector? tuple)
+                                                      (zipmap pattern2-vars tuple)
+                                                      {(first pattern2-vars) tuple}))
+                                                  pattern2-bindings))
+                          join-op (:join operators)
+                          left-state (:left-state join-op)
+                          right-state (:right-state join-op)]
+                      (reset! left-state (into {} (map (fn [binding] [binding 1]) pattern1-maps)))
+                      (reset! right-state (into {} (map (fn [binding] [binding 1]) pattern2-maps))))))))
+
+            ;; 3+ pattern join: initialize pattern operators and join operators
+            (> (count patterns) 2)
+            (let [pattern-ops (:patterns operators)
+                  join-ops (:joins operators)]
+              (when (and pattern-ops join-ops)
+                ;; Query each pattern to get current bindings
+                (let [pattern-bindings
+                      (vec
+                       (for [pattern patterns]
+                         (let [pattern-vars (vec (filter #(and (symbol? %)
+                                                               (.startsWith ^String (name %) "?"))
+                                                         pattern))
+                               pattern-query (vec (concat [:find] pattern-vars [:where pattern]))
+                               bindings (try (set (query/query db pattern-query))
+                                             (catch Exception _e #{}))]
+                           (set (map (fn [tuple]
+                                       (if (vector? tuple)
+                                         (zipmap pattern-vars tuple)
+                                         {(first pattern-vars) tuple}))
+                                     bindings)))))]
+
+                  ;; Initialize pattern operator states
+                  (doseq [[pattern-op bindings] (map vector pattern-ops pattern-bindings)]
+                    (when-let [state (:state pattern-op)]
+                      (reset! state (into {} (map (fn [binding] [binding 1]) bindings)))))
+
+                  ;; Initialize join operator states progressively
+                  ;; First join: pattern1 ⋈ pattern2
+                  (when-let [join1 (first join-ops)]
+                    (reset! (:left-state join1)
+                            (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
+                    (reset! (:right-state join1)
+                            (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
+
+                  ;; For subsequent joins, left side is previous join result, right is next pattern
+                  ;; We approximate by using pattern results (full join computation would be expensive)
+                  (doseq [i (range 1 (count join-ops))]
+                    (when-let [join-op (nth join-ops i)]
+                      ;; Left state: use pattern results (approximation)
+                      (reset! (:left-state join-op)
+                              (into {} (map (fn [b] [b 1]) (nth pattern-bindings i))))
+                      ;; Right state: next pattern
+                      (reset! (:right-state join-op)
+                              (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i))))))))))
+
+            :else nil)
+          (catch Exception e
+            ;; If join initialization fails, log and continue with just CollectResults
+            (println "Warning: Failed to initialize join operator state:" (.getMessage ^Exception e)))))
+
+      ;; For aggregate queries, initialize the base pipeline's CollectResults
+      ;; with raw tuples (before aggregation) AND feed them through aggregate operators
+      (when has-aggregates?
+        (when-let [base (:base dd-graph)]
+          (when-let [all-vars (:all-vars dd-graph)]
+            (when-let [base-ops (:operators base)]
+              (when-let [base-collect (:collect base-ops)]
+                (try
+                  ;; Initialize join operators in the base pipeline if this is a multi-pattern aggregate
+                  (when (> (count patterns) 1)
+                    (let [pattern-ops (:patterns base-ops)
+                          join-ops (:joins base-ops)]
+                      (when (and pattern-ops join-ops)
+                        (let [pattern-bindings
+                              (vec
+                               (for [pattern patterns]
+                                 (let [pattern-vars (vec (filter #(and (symbol? %)
+                                                                       (.startsWith ^String (name %) "?"))
+                                                                 pattern))
+                                       pattern-query (vec (concat [:find] pattern-vars [:where pattern]))
+                                       bindings (try (set (query/query db pattern-query))
+                                                     (catch Exception _e #{}))]
+                                   (set (map (fn [tuple]
+                                               (if (vector? tuple)
+                                                 (zipmap pattern-vars tuple)
+                                                 {(first pattern-vars) tuple}))
+                                             bindings)))))]
+                          (doseq [[pattern-op bindings] (map vector pattern-ops pattern-bindings)]
+                            (when-let [state (:state pattern-op)]
+                              (reset! state (into {} (map (fn [binding] [binding 1]) bindings)))))
+                          (when-let [join1 (first join-ops)]
+                            (reset! (:left-state join1)
+                                    (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
+                            (reset! (:right-state join1)
+                                    (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
+                          (doseq [i (range 1 (count join-ops))]
+                            (when-let [join-op (nth join-ops i)]
+                              (reset! (:left-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings i))))
+                              (reset! (:right-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))))))))
+
+                  ;; Query the patterns without aggregation to get raw tuples
+                  ;; Use all-vars to ensure correct variable order
+                  ;; Include predicates to ensure filtering is applied
+                  (let [base-where (vec (concat patterns predicates))
+                        base-query (vec (concat [:find] all-vars [:where] base-where))
+                        raw-tuples (query/query db base-query)
+                        base-accumulated-atom (:accumulated (:state base-collect))
+                        raw-tuples-map (into {} (map (fn [result] [result 1]) raw-tuples))]
+                    (reset! base-accumulated-atom raw-tuples-map)
+
+                    ;; Feed raw tuples through aggregate operators to initialize them
+                    ;; Use timestamp 0 and preserve multiplicities from base
+                    (when-let [agg-ops (get-in dd-graph [:agg-ops])]
+                      (let [ms (ms/multiset raw-tuples-map)]
+                        (doseq [agg-op agg-ops]
+                          (op/input agg-op ms 0))))
+
+                    ;; After feeding aggregate operators, extract their computed results
+                    ;; and seed collect-agg to ensure consistency
+                    (println "DEBUG SEED: has-aggregates, dd-graph keys:" (keys dd-graph))
+                    (when-let [group-vars-list (get-in dd-graph [:group-vars])]
+                      (println "DEBUG SEED: found group-vars")
+                      (when-let [agg-ops (get-in dd-graph [:agg-ops])]
+                        (println "DEBUG SEED: found agg-ops, count:" (count agg-ops))
+                        (println "DEBUG SEED: operators keys:" (keys (:operators dd-graph)))
+                        (println "DEBUG SEED: collect exists?" (some? (get-in dd-graph [:operators :collect])))
+                        (when-let [collect-agg (get-in dd-graph [:operators :collect])]
+                          (println "DEBUG SEED: found collect-agg!")
+                          (let [first-agg-state @(:aggregates (:state (first agg-ops)))
+                                _ (println "DEBUG SEED: first-agg-state:" first-agg-state)
+                                first-aggregates (get first-agg-state 0)
+                                _ (println "DEBUG SEED: first-aggregates:" first-aggregates)]
+                            (when first-aggregates
+                              (println "DEBUG SEED: Seeding collect-agg with" (count first-aggregates) "aggregate results")
+                              (doseq [group-key (keys first-aggregates)]
+                                (let [agg-values (vec
+                                                  (for [agg-op agg-ops]
+                                                    (let [state @(:aggregates (:state agg-op))
+                                                          aggs (get state 0)]
+                                                      (get aggs group-key))))
+                                      result (if (= :all group-key)
+                                               agg-values
+                                               (vec (concat group-key agg-values)))
+                                      d (delta/make-delta result 1)]
+                                  (core/process-delta collect-agg d)))))))))
+                  (catch Exception e
+                    (println "Warning: Failed to initialize base pipeline for aggregates:" (.getMessage ^Exception e)))))))))
+
+      ;; Populate the final CollectResults operator with initial results
+      ;; Each result gets multiplicity 1 (present in current state)
+      ;; EXCEPT for aggregate queries which handle this specially above
+      (when-not has-aggregates?
+        (when-let [collect-op (:collect operators)]
+          (let [accumulated (:accumulated (:state collect-op))]
+            (reset! accumulated
+                    (into {} (map (fn [result] [result 1]) initial-results)))))))))

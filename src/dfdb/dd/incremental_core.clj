@@ -1,6 +1,6 @@
-(ns dfdb.dd.simple-incremental
-  "Simplified incremental execution based on xtflow delta model."
-  (:require [dfdb.dd.delta-simple :as delta]))
+(ns dfdb.dd.incremental-core
+  "Core incremental execution based on xtflow delta model."
+  (:require [dfdb.dd.delta-core :as delta]))
 
 (set! *warn-on-reflection* true)
 
@@ -100,10 +100,10 @@
                      (repeat count value)))
                  accumulated))))
 
-(defn make-simple-pipeline
-  "Create simple operator pipeline for single-pattern query.
+(defn make-pattern-pipeline
+  "Create operator pipeline for single-pattern query.
   Returns {:process-deltas-fn get-results-fn}."
-  ([pattern find-vars] (make-simple-pipeline pattern find-vars []))
+  ([pattern find-vars] (make-pattern-pipeline pattern find-vars []))
   ([pattern find-vars predicate-filters]
 
    (let [;; Create operators

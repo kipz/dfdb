@@ -1,5 +1,5 @@
-(ns dfdb.dd.delta-simple
-  "Simplified delta model based on xtflow.
+(ns dfdb.dd.delta-core
+  "Core delta model based on xtflow.
   Each delta is {:binding {...} :mult +1/-1}"
   (:require [dfdb.dd.multiset :as ms]
             [clojure.set :as set]))

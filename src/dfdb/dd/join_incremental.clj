@@ -1,6 +1,6 @@
 (ns dfdb.dd.join-incremental
   "Incremental join operator for multi-pattern queries."
-  (:require [dfdb.dd.delta-simple :as delta]))
+  (:require [dfdb.dd.delta-core :as delta]))
 
 (set! *warn-on-reflection* true)
 

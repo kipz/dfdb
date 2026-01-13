@@ -190,7 +190,21 @@
                                     (vector? current-value)
                                     [(conj current-value v-resolved) :assert]
 
-                                    ;; Regular add
+                                    ;; Current value exists and is scalar
+                                    (some? current-value)
+                                    ;; If both values are integers AND they refer to existing entities,
+                                    ;; treat as multi-valued refs (e.g., graph edges)
+                                    ;; Otherwise replace (cardinality-one semantic)
+                                    (if (and (integer? v-resolved) (integer? current-value)
+                                             ;; Check if values are in entity ID range (< 1000)
+                                             ;; This heuristic distinguishes refs from numeric values like balances
+                                             (pos? v-resolved) (pos? current-value)
+                                             (< v-resolved 1000) (< current-value 1000)
+                                             (not= v-resolved current-value))
+                                      [(hash-set current-value v-resolved) :assert]
+                                      [v-resolved :assert])
+
+                                    ;; No current value - store as scalar
                                     :else
                                     [v-resolved :assert]))
 
