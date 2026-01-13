@@ -1,3 +1,5 @@
 .cpcache/
 .nrepl-port
 *.bak*
+.clj-kondo/
+.lsp/

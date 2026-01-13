@@ -412,11 +412,12 @@
                             :mode :incremental
                             :callback (fn [diff]
                                         ;; Update projection
+                                        ;; Process retractions first, then additions
+                                        (doseq [[id _ _ _] (:retractions diff)]
+                                          (swap! user-projection dissoc id))
                                         (doseq [[id name email status] (:additions diff)]
                                           (swap! user-projection assoc id
-                                                 {:name name :email email :status status}))
-                                        (doseq [[id _ _ _] (:retractions diff)]
-                                          (swap! user-projection dissoc id)))})]
+                                                 {:name name :email email :status status})))})]
 
         ;; Event: UserCreated
         (transact! db [{:user/id 1

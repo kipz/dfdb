@@ -37,8 +37,24 @@
     (let [binding (:binding delta)
           mult (:mult delta)
           ;; Project to find vars
-          projected (vec (map #(get binding %) find-vars))]
-      [(delta/make-delta projected mult)])))
+          values (map #(get binding %) find-vars)
+
+          ;; Handle multi-valued attributes: if any value is a set, expand into multiple deltas
+          has-set? (some set? values)]
+
+      (if has-set?
+        ;; Expand sets into multiple deltas (Cartesian product if multiple sets)
+        (let [expanded-values (map (fn [v] (if (set? v) (seq v) [v])) values)
+              ;; Cartesian product of all value lists
+              combinations (reduce (fn [acc vals]
+                                     (for [existing acc
+                                           v vals]
+                                       (conj existing v)))
+                                   [[]]
+                                   expanded-values)]
+          (map (fn [combo] (delta/make-delta (vec combo) mult)) combinations))
+        ;; No sets - simple projection
+        [(delta/make-delta (vec values) mult)]))))
 
 (defrecord PredicateFilter [pred-fn]
   ;; Filters deltas based on predicate function

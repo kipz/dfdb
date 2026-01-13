@@ -129,15 +129,18 @@
     (and latest (= :assert (:op latest)))))
 
 (defn resolve-value
-  "Resolve value if it's a lookup ref.
-  NOTE: Tempids only apply to entity IDs, not attribute values.
-  Negative numbers in values are legitimate data."
-  [db v _tempid-map tx-time]
+  "Resolve value if it's a lookup ref or tempid reference.
+  Tempids (negative integers) in attribute values are resolved to actual entity IDs."
+  [db v tempid-map tx-time]
   (cond
     (lookup-ref? v)
     (if-let [resolved (index/lookup-ref (:storage db) v tx-time)]
       resolved
       (throw (ex-info "Lookup ref not found in value" {:lookup-ref v})))
+
+    ;; Resolve tempid references in attribute values
+    (and (integer? v) (neg? v) (contains? tempid-map v))
+    (get tempid-map v)
 
     :else
     v))
@@ -309,7 +312,8 @@
         (notify-transaction listener db deltas-with-meta)
         (catch Exception e
           ;; Log but don't fail transaction if listener fails
-          (println "Warning: Transaction listener failed:" (.getMessage e)))))
+          (println "Warning: Transaction listener failed:" (.getMessage e))
+          (.printStackTrace e))))
 
     ;; Return result
     {:tx-id tx-id

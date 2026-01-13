@@ -54,15 +54,28 @@
 
         ;; If delta matches pattern's attribute
         (when (= attribute a-sym)
-
-          ;; Retract old binding
-          (when old-value
-            (swap! binding-deltas conj
-                   (remove-delta {e-sym entity, v-sym old-value})))
-
-          ;; Add new binding
-          (when (and new-value (= operation :assert))
-            (swap! binding-deltas conj
-                   (add-delta {e-sym entity, v-sym new-value}))))))
+          ;; For set-valued attributes, compute diff to avoid spurious retractions
+          (if (or (set? old-value) (set? new-value))
+            ;; Set-valued attribute: compute set difference
+            (let [old-set (if (set? old-value) old-value (if old-value #{old-value} #{}))
+                  new-set (if (set? new-value) new-value (if new-value #{new-value} #{}))
+                  removed (clojure.set/difference old-set new-set)
+                  added (clojure.set/difference new-set old-set)]
+              ;; Retract elements that were removed (in old but not in new)
+              (doseq [elem removed]
+                (swap! binding-deltas conj
+                       (remove-delta {e-sym entity, v-sym elem})))
+              ;; Add elements that were added (in new but not in old)
+              (doseq [elem added]
+                (swap! binding-deltas conj
+                       (add-delta {e-sym entity, v-sym elem}))))
+            ;; Single-valued attribute: simple retract + add
+            (do
+              (when old-value
+                (swap! binding-deltas conj
+                       (remove-delta {e-sym entity, v-sym old-value})))
+              (when (and new-value (= operation :assert))
+                (swap! binding-deltas conj
+                       (add-delta {e-sym entity, v-sym new-value}))))))))
 
     @binding-deltas))

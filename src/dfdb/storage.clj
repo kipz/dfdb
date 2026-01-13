@@ -135,6 +135,15 @@
                      ops)))
     this)
 
+  StreamingStorage
+  (scan-stream [_this start-key end-key _opts]
+    ;; For MemoryStorage, scan-stream is the same as scan (already lazy)
+    (->> @data-atom
+         (filter (fn [[k _]]
+                   (and (>= (compare-keys k start-key) 0)
+                        (< (compare-keys k end-key) 0))))
+         (sort-by first compare-keys)))
+
   StorageLifecycle
   (close [_this]
     nil)

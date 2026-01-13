@@ -106,41 +106,58 @@
                              (filter (fn [[_k d]] (get d (:dimension temporal-spec))) filtered)
                              filtered)
             ;; Get ALL datoms after temporal filtering
-            all-datoms (map second with-dimension)
-
-            ;; Group by value to track each EAV separately
-            by-value (group-by :v all-datoms)
-
-            ;; For each value, check if it's currently asserted (latest op = assert)
-            asserted-values (keep (fn [[val value-datoms]]
-                                    (let [sorted (sort index/datom-comparator value-datoms)
-                                          latest (first sorted)]
-                                      (when (= :assert (:op latest))
-                                        {:value val :datom latest :tx-id (:tx-id latest)})))
-                                  by-value)]
+            all-datoms (map second with-dimension)]
 
         ;; Decision: If :at/ modifier present, return ALL values with dimension
-        ;; (time-series use case). Otherwise, use latest-tx semantics
-        (if (seq asserted-values)
+        ;; (time-series use case). Otherwise, return only the LATEST value
+        (if (seq all-datoms)
           (if temporal-spec
-            ;; Time-series mode: return ALL values with dimension
-            (set (keep (fn [{:keys [value datom]}]
-                         (let [new-bindings (if v-is-wildcard?
-                                              bindings
-                                              (assoc bindings v value))
-                               result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
-                           result))
-                       asserted-values))
-            ;; Normal mode: return only values from latest tx
-            (let [latest-tx (apply max (map :tx-id asserted-values))
-                  latest-value-states (filter #(= latest-tx (:tx-id %)) asserted-values)]
-              (set (keep (fn [{:keys [value datom]}]
-                           (let [new-bindings (if v-is-wildcard?
-                                                bindings
-                                                (assoc bindings v value))
-                                 result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
-                             result))
-                         latest-value-states))))
+            ;; Time-series mode: group by value and return ALL asserted values with dimension
+            (let [by-value (group-by :v all-datoms)
+                  asserted-values (keep (fn [[val value-datoms]]
+                                          (let [sorted (sort index/datom-comparator value-datoms)
+                                                latest (first sorted)]
+                                            (when (= :assert (:op latest))
+                                              {:value val :datom latest})))
+                                        by-value)]
+              (set (mapcat (fn [{:keys [value datom]}]
+                             ;; Handle multi-valued attributes (sets)
+                             (if (and (set? value) v-is-var?)
+                               (map (fn [elem]
+                                      (let [new-bindings (assoc bindings v elem)]
+                                        (temporal/bind-temporal-value new-bindings datom temporal-spec)))
+                                    value)
+                               (let [new-bindings (if v-is-wildcard?
+                                                    bindings
+                                                    (assoc bindings v value))
+                                     result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
+                                 [result])))
+                           asserted-values)))
+            ;; Normal/temporal mode: group by value, take latest for each, return all from latest tx
+            (let [by-value (group-by :v all-datoms)
+                  latest-per-value (keep (fn [[val value-datoms]]
+                                           (let [sorted (sort index/datom-comparator value-datoms)
+                                                 latest (first sorted)]
+                                             (when (= :assert (:op latest))
+                                               {:value val :datom latest :tx-id (:tx-id latest)})))
+                                         by-value)]
+              (if (seq latest-per-value)
+                (let [latest-tx (apply max (map :tx-id latest-per-value))
+                      latest-values (filter #(= latest-tx (:tx-id %)) latest-per-value)]
+                  (set (mapcat (fn [{:keys [value datom]}]
+                                 ;; Handle multi-valued attributes (sets)
+                                 (if (and (set? value) v-is-var?)
+                                   (map (fn [elem]
+                                          (let [new-bindings (assoc bindings v elem)]
+                                            (temporal/bind-temporal-value new-bindings datom temporal-spec)))
+                                        value)
+                                   (let [new-bindings (if v-is-wildcard?
+                                                        bindings
+                                                        (assoc bindings v value))
+                                         result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
+                                     [result])))
+                               latest-values)))
+                #{})))
           #{}))
 
       ;; Case 3: [?e :attr "value"] - e variable, v constant
@@ -168,18 +185,64 @@
             ;; If :at/dimension specified, filter to datoms that HAVE that dimension
             with-dimension (if temporal-spec
                              (filter (fn [[_k d]] (get d (:dimension temporal-spec))) filtered)
-                             filtered)]
-        (set (keep (fn [[_k datom]]
-                     (when (and (= (:a datom) a-val)
-                                (= :assert (:op datom)))
-                       (let [new-bindings (assoc bindings e (:e datom))
-                             with-value (if (or v-is-wildcard? v-is-var?)
-                                          (if v-is-wildcard?
-                                            new-bindings
-                                            (assoc new-bindings v (:v datom)))
-                                          new-bindings)]
-                         (temporal/bind-temporal-value with-value datom temporal-spec))))
-                   with-dimension)))
+                             filtered)
+            all-datoms (map second with-dimension)]
+
+        (if (seq all-datoms)
+          (if temporal-spec
+            ;; Time-series mode: return ALL asserted values with dimension
+            (let [result-list (mapcat (fn [datom]
+                                        (when (and (= (:a datom) a-val)
+                                                   (= :assert (:op datom)))
+                                          (let [new-bindings (assoc bindings e (:e datom))
+                                                datom-value (:v datom)]
+                                            (if (and (set? datom-value) v-is-var?)
+                                              (map (fn [elem]
+                                                     (let [with-value (assoc new-bindings v elem)]
+                                                       (temporal/bind-temporal-value with-value datom temporal-spec)))
+                                                   datom-value)
+                                              (let [with-value (if (or v-is-wildcard? v-is-var?)
+                                                                 (if v-is-wildcard?
+                                                                   new-bindings
+                                                                   (assoc new-bindings v datom-value))
+                                                                 new-bindings)
+                                                    final-binding (temporal/bind-temporal-value with-value datom temporal-spec)]
+                                                [final-binding])))))
+                                      all-datoms)]
+              (set result-list))
+            ;; Normal/temporal mode: group by EAV, take latest for each, then group by entity and take latest tx per entity
+            (let [by-eav (group-by (juxt :e :a :v) all-datoms)
+                  latest-per-eav (keep (fn [[_eav eav-datoms]]
+                                         (let [sorted (sort index/datom-comparator eav-datoms)
+                                               latest (first sorted)]
+                                           (when (= :assert (:op latest))
+                                             latest)))
+                                       by-eav)
+                  ;; Group by entity and for each entity, take only datoms from latest tx for that entity
+                  by-entity (group-by :e latest-per-eav)
+                  latest-per-entity (mapcat (fn [[_eid entity-datoms]]
+                                              (let [latest-tx-for-entity (apply max (map :tx-id entity-datoms))]
+                                                (filter #(= latest-tx-for-entity (:tx-id %)) entity-datoms)))
+                                            by-entity)
+                  result-list (mapcat (fn [datom]
+                                        (when (= (:a datom) a-val)
+                                          (let [new-bindings (assoc bindings e (:e datom))
+                                                datom-value (:v datom)]
+                                            (if (and (set? datom-value) v-is-var?)
+                                              (map (fn [elem]
+                                                     (let [with-value (assoc new-bindings v elem)]
+                                                       (temporal/bind-temporal-value with-value datom temporal-spec)))
+                                                   datom-value)
+                                              (let [with-value (if (or v-is-wildcard? v-is-var?)
+                                                                 (if v-is-wildcard?
+                                                                   new-bindings
+                                                                   (assoc new-bindings v datom-value))
+                                                                 new-bindings)
+                                                    final-binding (temporal/bind-temporal-value with-value datom temporal-spec)]
+                                                [final-binding])))))
+                                      latest-per-entity)]
+              (set result-list)))
+          #{}))
 
       :else
       (throw (ex-info "Unsupported pattern" {:pattern pattern})))))
@@ -241,18 +304,35 @@
         (set (filter #(eval-predicate pred-list %) bindings-set))))))
 
 (defn join-bindings
-  "Join two sets of bindings on common variables."
+  "Join two sets of bindings on common variables using hash join.
+  O(n+m) instead of O(n×m) for better performance on large result sets.
+  Uses INNER JOIN semantics - if either input is empty, result is empty."
   [bindings1 bindings2]
-  (if (empty? bindings1)
-    bindings2
-    (if (empty? bindings2)
-      bindings1
-      (let [common-vars (set/intersection (set (keys (first bindings1)))
-                                          (set (keys (first bindings2))))]
-        (set (for [b1 bindings1
-                   b2 bindings2
-                   :when (every? (fn [v] (= (get b1 v) (get b2 v))) common-vars)]
-               (merge b1 b2)))))))
+  (if (or (empty? bindings1) (empty? bindings2))
+    #{}  ;; Inner join: empty input produces empty output
+    (let [common-vars (set/intersection (set (keys (first bindings1)))
+                                        (set (keys (first bindings2))))]
+      (if (empty? common-vars)
+          ;; No common variables - Cartesian product (rare case)
+        (set (for [b1 bindings1 b2 bindings2]
+               (merge b1 b2)))
+          ;; Hash join: build hash table from smaller side, probe with larger side
+        (let [;; Choose smaller relation for build phase
+              [build-side probe-side] (if (<= (count bindings1) (count bindings2))
+                                        [bindings1 bindings2]
+                                        [bindings2 bindings1])
+                ;; Build phase: create hash table join-key -> [bindings]
+              hash-table (reduce (fn [ht binding]
+                                   (let [join-key (select-keys binding common-vars)]
+                                     (update ht join-key (fnil conj []) binding)))
+                                 {}
+                                 build-side)]
+            ;; Probe phase: look up each probe-side binding and merge matches
+          (set (mapcat (fn [probe-binding]
+                         (let [join-key (select-keys probe-binding common-vars)]
+                           (when-let [matching-bindings (get hash-table join-key)]
+                             (map #(merge % probe-binding) matching-bindings))))
+                       probe-side)))))))
 
 (defn predicate-clause?
   "Check if clause is a predicate (function call) vs pattern.
@@ -295,18 +375,19 @@
     (vector? clause)
     (let [[_e a _v] clause]
       (if (recursive/recursive-attribute? a)
-        ;; Recursive pattern
+        ;; Recursive pattern - still uses mapcat for now
         (if (empty? bindings-set)
           (recursive/match-recursive-pattern db clause {} as-of-map)
           (set (mapcat (fn [bindings]
                          (recursive/match-recursive-pattern db clause bindings as-of-map))
                        bindings-set)))
-        ;; Normal pattern
+        ;; Normal pattern - optimized with hash join
         (if (empty? bindings-set)
           (match-pattern db clause {} as-of-map)
-          (set (mapcat (fn [bindings]
-                         (match-pattern db clause bindings as-of-map))
-                       bindings-set)))))
+          ;; OPTIMIZATION: Instead of mapcat (O(n × pattern-cost)),
+          ;; get all pattern results once and hash join (O(n + m))
+          (let [pattern-results (match-pattern db clause {} as-of-map)]
+            (join-bindings bindings-set pattern-results)))))
 
     :else
     (throw (ex-info "Unknown where clause type" {:clause clause}))))

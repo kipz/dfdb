@@ -43,6 +43,10 @@
         ;; Returns nil for recursive queries (fallback to re-execution)
         dd-graph (dd/build-pipeline query db)
 
+        ;; Initialize DD graph with existing database state
+        _ (when dd-graph
+            (dd/initialize-pipeline-state dd-graph db query))
+
         ;; Initial query execution
         initial-results (query/query db query)
 
@@ -82,7 +86,7 @@
 
 (defn notify-subscription
   "Notify a subscription of changes using TRUE differential dataflow."
-  [_db subscription deltas]
+  [_db subscription deltas force-notify?]
   (when @(:active? subscription)
     (let [dd-graph (:dd-graph subscription)]
 
@@ -116,8 +120,8 @@
                      (transform raw-diff)
                      raw-diff)]
 
-          ;; Deliver diff if non-empty
-          (when (or (seq (:additions diff)) (seq (:retractions diff)))
+          ;; Deliver diff if non-empty OR if force-notify? is true (watched dimension changed)
+          (when (or (seq (:additions diff)) (seq (:retractions diff)) force-notify?)
             (case (:delivery subscription)
               :callback (when-let [cb (:callback subscription)]
                           (cb diff))
@@ -137,25 +141,29 @@
   (doseq [[_id subscription] @subscriptions]
     (when @(:active? subscription)
       (try
-        ;; Check if any delta dimensions match watch-dimensions
+        ;; Check if delta dimensions match watch-dimensions
+        ;; ANY watch-dimension changed triggers notification (OR logic)
+        ;; EXCLUDE :time/system as it's always present on every transaction
         (let [delta-dims (set (for [delta deltas
-                                    :when (map? delta)  ; Ensure delta is a map
+                                    :when (map? delta)
                                     dim-key (keys delta)
                                     :when (and (keyword? dim-key)
                                                (namespace dim-key)
-                                               (.startsWith (namespace dim-key) "time"))]
+                                               (.startsWith (namespace dim-key) "time")
+                                               (not= dim-key :time/system))]  ; Exclude :time/system
                                 dim-key))
-              watch-dims (set (:watch-dimensions subscription))
-              should-notify? (seq (set/intersection delta-dims watch-dims))]
+              watch-dims (set (remove #{:time/system} (:watch-dimensions subscription)))  ; Exclude :time/system from watch list too
+              ;; Notify if ANY watch-dimension is present in delta
+              ;; If watch-dims is empty (only watching :time/system), always notify
+              should-notify? (if (empty? watch-dims)
+                               true
+                               (seq (set/intersection watch-dims delta-dims)))
+              ;; Force notification only if explicit watch-dimensions are specified
+              force-notify? (and (not (empty? watch-dims)) should-notify?)]
           (when should-notify?
-            (try
-              (notify-subscription db subscription deltas)
-              (catch Exception e
-                (println "Warning: Failed to notify subscription" (:id subscription) "-" (.getMessage e))
-                ;; Continue with other subscriptions
-                nil))))
+            (notify-subscription db subscription deltas force-notify?)))
         (catch Exception e
-          (println "Warning: Failed to process subscription" (:id subscription) "-" (.getMessage e)))))))
+          (println "Warning: Failed to notify subscription" (:id subscription) "-" (.getMessage e)))))))
 
 (defrecord SubscriptionNotifier []
   tx/TransactionListener

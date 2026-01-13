@@ -6,7 +6,7 @@
 
 (defrecord IncrementalJoinOperator [left-state right-state join-vars]
   simple/DeltaOperator
-  (process-delta [_this delta]
+  (process-delta [this delta]
     (let [binding (:binding delta)
           mult (:mult delta)
           source (:source delta :left)]
@@ -64,7 +64,7 @@
        (= 1 (count patterns))
        (simple/make-simple-pipeline (first patterns) find-vars)
 
-      ;; Exactly two patterns - incremental join
+      ;; Exactly two patterns - simple join
        (= 2 (count patterns))
        (let [pattern1 (first patterns)
              pattern2 (second patterns)
@@ -97,7 +97,6 @@
                 (let [pattern-out (simple/process-delta pattern-op1 d)
                       tagged (map #(assoc % :source :left) pattern-out)
                       joined (mapcat #(simple/process-delta join-op %) tagged)
-                      ;; Apply predicate filters BEFORE projection
                       filtered (apply-filters joined)
                       projected (mapcat #(simple/process-delta project-op %) filtered)]
                   (doseq [p projected]
@@ -107,7 +106,6 @@
                 (let [pattern-out (simple/process-delta pattern-op2 d)
                       tagged (map #(assoc % :source :right) pattern-out)
                       joined (mapcat #(simple/process-delta join-op %) tagged)
-                      ;; Apply predicate filters BEFORE projection
                       filtered (apply-filters joined)
                       projected (mapcat #(simple/process-delta project-op %) filtered)]
                   (doseq [p projected]
@@ -123,94 +121,100 @@
            :project project-op
            :collect collect-op}})
 
-      ;; Three or more patterns - recursively build left-deep join tree
-      ;; Strategy: ((P1 ⋈ P2) ⋈ P3) ⋈ P4 ...
+      ;; Three+ patterns - chain multiple joins
        (> (count patterns) 2)
-       (let [;; Get all variables from all patterns to use as intermediate projection
-             all-vars (vec (distinct (apply concat
-                                            (map #(filter (fn [x] (and (symbol? x) (.startsWith (name x) "?"))) %)
-                                                 patterns))))
+       (let [;; Build chain: (P1 ⋈ P2) ⋈ P3 ⋈ P4 ...
+             pattern-ops (mapv (fn [p] (simple/->PatternOperator p (atom {}))) patterns)
 
-             ;; Build pipeline for first two patterns
-             first-two-pipeline (make-multi-pattern-pipeline
-                                 (take 2 patterns)
-                                 all-vars
-                                 predicate-filters)
+            ;; Create join operators for each step
+            ;; Join-0: P1 ⋈ P2 on common(P1, P2)
+            ;; Join-1: Result-0 ⋈ P3 on common(Result-0, P3)
+            ;; Join-2: Result-1 ⋈ P4 on common(Result-1, P4)
+             join-ops (vec (for [i (range 1 (count patterns))]
+                             (if (= i 1)
+                               ;; First join: P1 ⋈ P2
+                               (let [p1-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?")) (nth patterns 0)))
+                                     p2-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?")) (nth patterns 1)))
+                                     join-vars (vec (set/intersection p1-vars p2-vars))]
+                                 (make-incremental-join join-vars))
+                               ;; Later joins: Accumulated ⋈ Pi
+                               (let [left-vars (set (mapcat #(filter (fn [x] (and (symbol? x) (.startsWith (name x) "?"))) %)
+                                                            (take i patterns)))
+                                     right-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?"))
+                                                             (nth patterns i)))
+                                     join-vars (vec (set/intersection left-vars right-vars))]
+                                 (make-incremental-join join-vars)))))
 
-             ;; Recursively build join tree: join result of first two with remaining patterns
-             ;; We create a synthetic pattern from the joined results and join with next pattern
-             remaining-patterns (drop 2 patterns)
+            ;; Helper to apply filters
+             apply-filters (fn [deltas]
+                             (if (empty? predicate-filters)
+                               deltas
+                               (reduce (fn [ds filter-op]
+                                         (mapcat #(simple/process-delta filter-op %) ds))
+                                       deltas
+                                       predicate-filters)))
 
-             ;; Create operators for remaining patterns
-             remaining-ops (mapv (fn [p] (simple/->PatternOperator p (atom {}))) remaining-patterns)
-
-             ;; Build chain of joins
+             project-op (simple/->ProjectOperator find-vars (atom {}))
              collect-op (simple/->CollectResults {:accumulated (atom {})})]
 
-         (when first-two-pipeline
-           {:process-deltas
-            (fn [tx-deltas]
-              ;; Process first two patterns
-              ((:process-deltas first-two-pipeline) tx-deltas)
-              (let [intermediate-results ((:get-results first-two-pipeline))]
+         {:process-deltas
+          (fn [tx-deltas]
+           ;; Process each pattern's deltas through the join chain
+            (doseq [[idx pattern] (map-indexed vector patterns)]
+              (let [pattern-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)
+                    pattern-op (nth pattern-ops idx)]
 
-                ;; Reset collect
-                (reset! (:accumulated (:state collect-op)) {})
+                (doseq [d pattern-deltas]
+                  (let [pattern-out (simple/process-delta pattern-op d)]
 
-                ;; For each remaining pattern, simulate a join
-                ;; This is a simplified implementation - proper DD would maintain arrangements
-                (let [final-results
-                      (reduce
-                       (fn [current-results [idx pattern]]
-                         (let [pattern-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)
-                               pattern-op (nth remaining-ops idx)
+                    (if (zero? idx)
+                     ;; First pattern - feed to first join's left side
+                      (let [tagged (map #(assoc % :source :left) pattern-out)
+                            joined (mapcat #(simple/process-delta (first join-ops) %) tagged)]
+                       ;; Chain through remaining joins on LEFT side (accumulated results)
+                        (let [final-deltas
+                              (reduce (fn [deltas join-idx]
+                                        (if (< join-idx (count join-ops))
+                                          (let [join-op (nth join-ops join-idx)
+                                                ;; Tag as LEFT - this is the accumulated result
+                                                tagged (map #(assoc % :source :left) deltas)]
+                                            (mapcat #(simple/process-delta join-op %) tagged))
+                                          deltas))
+                                      joined
+                                      (range 1 (count join-ops)))
+                              filtered (apply-filters final-deltas)
+                              projected (mapcat #(simple/process-delta project-op %) filtered)]
+                          (doseq [p projected]
+                            (simple/process-delta collect-op p))))
 
-                               ;; Get all bindings from pattern
-                               pattern-bindings (set
-                                                 (mapcat
-                                                  (fn [d]
-                                                    (let [out (simple/process-delta pattern-op d)]
-                                                      (map :binding out)))
-                                                  pattern-deltas))
+                     ;; Later patterns - feed to corresponding join's right side
+                      (let [join-idx (dec idx)  ; Pattern 2 goes to join 0's right, Pattern 3 goes to join 1's right, etc.
+                            tagged (map #(assoc % :source :right) pattern-out)
+                            joined (mapcat #(simple/process-delta (nth join-ops join-idx) %) tagged)]
+                       ;; Chain output through NEXT joins on LEFT side (this is now accumulated)
+                        (let [final-deltas
+                              (reduce (fn [deltas ji]
+                                        (if (and deltas (< ji (count join-ops)))
+                                          (let [join-op (nth join-ops ji)
+                                                ;; Tag as LEFT for next join - accumulated result
+                                                tagged (map #(assoc % :source :left) deltas)]
+                                            (mapcat #(simple/process-delta join-op %) tagged))
+                                          deltas))
+                                      joined
+                                      (range (inc join-idx) (count join-ops)))
+                              filtered (when final-deltas (apply-filters final-deltas))
+                              projected (when filtered (mapcat #(simple/process-delta project-op %) filtered))]
+                          (doseq [p projected]
+                            (simple/process-delta collect-op p))))))))))
 
-                               ;; Find common variables between current results and pattern
-                               current-vars (when (seq current-results) (set (keys (first current-results))))
-                               pattern-vars (when (seq pattern-bindings) (set (keys (first pattern-bindings))))
-                               common-vars (set/intersection current-vars pattern-vars)
+          :get-results
+          (fn [] (simple/get-results collect-op))
 
-                               ;; Join current results with pattern bindings
-                               joined (if (empty? common-vars)
-                                        ;; Cross product
-                                        (set (for [r current-results
-                                                   b pattern-bindings]
-                                               (merge r b)))
-                                        ;; Natural join on common variables
-                                        (set (for [r current-results
-                                                   b pattern-bindings
-                                                   :when (every? #(= (get r %) (get b %)) common-vars)]
-                                               (merge r b))))]
-                           joined))
-                       intermediate-results
-                       (map-indexed vector remaining-patterns))
-
-                      ;; Apply predicate filters and project to find vars
-                      filtered (if (empty? predicate-filters)
-                                 final-results
-                                 (reduce
-                                  (fn [results filter-op]
-                                    (set (filter #(seq (simple/process-delta filter-op (delta/make-delta % 1)))
-                                                 results)))
-                                  final-results
-                                  predicate-filters))
-
-                      projected (set (map #(vec (map (fn [v] (get % v)) find-vars)) filtered))]
-
-                  ;; Feed to collector
-                  (doseq [result projected]
-                    (simple/process-delta collect-op (delta/make-delta result 1))))))
-
-            :get-results
-            (fn [] (simple/get-results collect-op))}))
+          :operators
+          {:patterns pattern-ops
+           :joins join-ops
+           :project project-op
+           :collect collect-op}})
 
        :else
        nil))))

@@ -7,7 +7,8 @@
             [dfdb.dd.multiset :as ms]
             [dfdb.dd.operator :as op]
             [dfdb.dd.recursive-incremental :as rec]
-            [dfdb.query :as query]))
+            [dfdb.query :as query]
+            [dfdb.index :as index]))
 
 (declare add-not-filter)
 
@@ -233,3 +234,38 @@
                       {:not-pattern not-pattern})))))
 
 ;; build-pipeline is the main entry point defined earlier in the file
+
+;; =============================================================================
+;; DD Pipeline State Initialization
+;; =============================================================================
+
+(defn initialize-pipeline-state
+  "Initialize DD pipeline state with existing database contents.
+  The DD pipeline starts with empty state and only learns from deltas.
+  This function bootstraps the state by scanning the database and generating
+  synthetic 'add' deltas for all existing data matching the query patterns."
+  [dd-graph db query-form]
+  (when dd-graph
+    (let [parsed (query/parse-query query-form)
+          patterns (filter pattern-clause? (:where parsed))
+          storage (:storage db)]
+
+      ;; For each pattern, scan database and generate initial deltas
+      (doseq [pattern patterns]
+        (let [[_e a _v] pattern]
+          (when (keyword? a)  ; Only for concrete attributes
+            ;; Scan all datoms for this attribute
+            (let [datoms (index/scan-aevt storage [:aevt a] [:aevt (index/successor-value a)])
+                  ;; Convert to synthetic transaction deltas
+                  init-deltas (map (fn [[_k datom]]
+                                     {:entity (:e datom)
+                                      :attribute (:a datom)
+                                      :old-value nil
+                                      :new-value (:v datom)
+                                      :operation :assert
+                                      :time/system (:t datom)})
+                                   (filter #(= :assert (:op (second %))) datoms))]
+
+              ;; Feed through DD pipeline
+              (when (seq init-deltas)
+                ((:process-deltas dd-graph) init-deltas)))))))))
