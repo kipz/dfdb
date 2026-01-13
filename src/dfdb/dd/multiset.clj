@@ -2,6 +2,8 @@
   "Multiset implementation for differential dataflow.
   A multiset is a collection where elements can appear with multiplicity (count).")
 
+(set! *warn-on-reflection* true)
+
 (deftype Multiset [values]
   ;; values is a map: {value -> count}
 
@@ -34,14 +36,14 @@
   ([ms value]
    (add ms value 1))
   ([ms value multiplicity]
-   (Multiset. (update (.values ms) value (fnil + 0) multiplicity))))
+   (Multiset. (update (.values ^Multiset ms) value (fnil + 0) multiplicity))))
 
 (defn remove-elem
   "Remove an element from multiset with given multiplicity (default 1)."
   ([ms value]
    (remove-elem ms value 1))
   ([ms value multiplicity]
-   (let [new-values (update (.values ms) value (fnil - 0) multiplicity)
+   (let [new-values (update (.values ^Multiset ms) value (fnil - 0) multiplicity)
          ;; Remove entries with count <= 0
          cleaned (into {} (filter (fn [[_k v]] (pos? v)) new-values))]
      (Multiset. cleaned))))
@@ -49,13 +51,13 @@
 (defn get-count
   "Get multiplicity of value in multiset."
   [ms value]
-  (get (.values ms) value 0))
+  (get (.values ^Multiset ms) value 0))
 
 (defn merge-multisets
   "Merge two multisets by adding multiplicities."
   [ms1 ms2]
   (Multiset.
-   (merge-with + (.values ms1) (.values ms2))))
+   (merge-with + (.values ^Multiset ms1) (.values ^Multiset ms2))))
 
 (defn empty-multiset
   "Create an empty multiset."

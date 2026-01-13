@@ -1,6 +1,8 @@
 (ns dfdb.storage
   "Storage abstraction for dfdb indexes.")
 
+(set! *warn-on-reflection* true)
+
 (defprotocol Storage
   "Abstraction over persistent storage for indexes.
   Keys are vectors representing index coordinates.
@@ -57,7 +59,7 @@
                       (assoc context-info
                              :namespace ns-sym
                              :note "Add the required dependency to deps.edn if needed"
-                             :original-error (.getMessage e))
+                             :original-error (.getMessage ^Exception e))
                       e)))
     (catch Exception e
       (throw (ex-info (str "Failed to load storage backend: " ns-sym)

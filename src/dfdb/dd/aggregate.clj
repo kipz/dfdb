@@ -3,6 +3,8 @@
   (:require [dfdb.dd.multiset :as ms]
             [dfdb.dd.operator :as op]))
 
+(set! *warn-on-reflection* true)
+
 (defrecord AggregateOperator [group-fn agg-fn state downstream]
   ;; group-fn: extract grouping key from value
   ;; agg-fn: aggregate function (count, sum, avg, etc.)

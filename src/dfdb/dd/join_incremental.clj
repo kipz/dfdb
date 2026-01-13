@@ -2,6 +2,8 @@
   "Incremental join operator for multi-pattern queries."
   (:require [dfdb.dd.delta-simple :as delta]))
 
+(set! *warn-on-reflection* true)
+
 (defrecord IncrementalJoin [left-state right-state join-vars]
   ;; Maintains state for both sides of join
   ;; On input to one side, probes other side
@@ -66,6 +68,6 @@
 (defn natural-join-variables
   "Find common variables between two patterns for natural join."
   [pattern1 pattern2]
-  (let [vars1 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern1)
-        vars2 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern2)]
+  (let [vars1 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern1)
+        vars2 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern2)]
     (vec (filter (set vars1) vars2))))

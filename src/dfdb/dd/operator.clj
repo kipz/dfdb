@@ -2,6 +2,8 @@
   "Differential dataflow operator protocol and base implementations."
   (:require [dfdb.dd.multiset :as ms]))
 
+(set! *warn-on-reflection* true)
+
 (defprotocol Operator
   "Differential dataflow operator protocol."
   (input [_this collection timestamp]

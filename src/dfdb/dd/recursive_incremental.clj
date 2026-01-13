@@ -1,6 +1,8 @@
 (ns dfdb.dd.recursive-incremental
   "Incremental transitive closure for recursive subscriptions.
 
+(set! *warn-on-reflection* true)
+
   TRUE DIFFERENTIAL DATAFLOW - NO RE-EXECUTION:
   - Initial seed: Uses query engine (allowed)
   - Updates: ONLY processes changed edges and affected entities"
@@ -70,8 +72,8 @@
         [e-pattern a-pattern v-pattern] recursive-pattern
         base-attr (recursive/base-attribute a-pattern)
 
-        e-var (when (and (symbol? e-pattern) (.startsWith (name e-pattern) "?")) e-pattern)
-        v-var (when (and (symbol? v-pattern) (.startsWith (name v-pattern) "?")) v-pattern)
+        e-var (when (and (symbol? e-pattern) (.startsWith ^String (name e-pattern) "?")) e-pattern)
+        v-var (when (and (symbol? v-pattern) (.startsWith ^String (name v-pattern) "?")) v-pattern)
 
         ;; State
         edges (atom {})  ; {from -> #{to ...}}

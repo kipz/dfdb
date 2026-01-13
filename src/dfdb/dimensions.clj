@@ -3,6 +3,8 @@
   (:require [dfdb.db :as db]
             [dfdb.index :as index]))
 
+(set! *warn-on-reflection* true)
+
 (declare get-entity-dimensions)
 
 (def system-time-dimension
@@ -50,7 +52,7 @@
         this-dim-val (get time-dimensions dim-name)
         after-dim-val (get time-dimensions after-dim)]
     (when (and this-dim-val after-dim-val)
-      (when (< (.getTime this-dim-val) (.getTime after-dim-val))
+      (when (< (.getTime ^java.util.Date this-dim-val) (.getTime ^java.util.Date after-dim-val))
         (throw (ex-info (str "Constraint violation - " dim-name " must be after " after-dim)
                         {:dimension dim-name
                          :constraint constraint
@@ -68,7 +70,7 @@
             v1 (get time-dimensions dim1)
             v2 (get time-dimensions dim2)]
         (when (and v1 v2)
-          (- (.getTime v1) (.getTime v2)))))))
+          (- (.getTime ^java.util.Date v1) (.getTime ^java.util.Date v2)))))))
 
 (defn validate-constraints
   "Validate all constraints for dimension definitions in time-dimensions map."
@@ -139,7 +141,7 @@
   For updates, merges with existing entity dimensions before validation."
   [db time-dimensions tx-time entity-id]
   (let [;; Add system-time (always present)
-        with-system (assoc time-dimensions :time/system (java.util.Date. tx-time))
+        with-system (assoc time-dimensions :time/system (java.util.Date. ^long tx-time))
 
         ;; Get existing dimensions from entity if updating
         existing-dims (when entity-id (get-entity-dimensions db entity-id))
@@ -175,7 +177,7 @@
                        (select-keys datom
                                     (filter #(and (keyword? %)
                                                   (namespace %)
-                                                  (.startsWith (namespace %) "time"))
+                                                  (.startsWith ^String (namespace %) "time"))
                                             (keys datom)))))
               {}
               datoms))))

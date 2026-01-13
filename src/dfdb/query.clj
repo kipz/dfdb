@@ -5,6 +5,8 @@
             [dfdb.recursive :as recursive]
             [clojure.set :as set]))
 
+(set! *warn-on-reflection* true)
+
 (def predicate-fns
   "Static map of supported predicate functions."
   {'= =
@@ -40,7 +42,7 @@
 (defn variable?
   "Check if symbol is a query variable (starts with ?)."
   [x]
-  (and (symbol? x) (.startsWith (name x) "?")))
+  (and (symbol? x) (.startsWith ^String (name x) "?")))
 
 (defn wildcard?
   "Check if symbol is a wildcard (_)."
@@ -251,7 +253,7 @@
   "Convert value to comparable form (Dates to millis)."
   [v]
   (if (instance? java.util.Date v)
-    (.getTime v)
+    (.getTime ^java.util.Date v)
     v))
 
 (defn eval-predicate
@@ -321,12 +323,14 @@
               [build-side probe-side] (if (<= (count bindings1) (count bindings2))
                                         [bindings1 bindings2]
                                         [bindings2 bindings1])
-                ;; Build phase: create hash table join-key -> [bindings]
-              hash-table (reduce (fn [ht binding]
-                                   (let [join-key (select-keys binding common-vars)]
-                                     (update ht join-key (fnil conj []) binding)))
-                                 {}
-                                 build-side)]
+                ;; Build phase: create hash table join-key -> [bindings] using transient
+              hash-table (persistent!
+                          (reduce (fn [ht binding]
+                                    (let [join-key (select-keys binding common-vars)
+                                          existing (get ht join-key [])]
+                                      (assoc! ht join-key (conj existing binding))))
+                                  (transient {})
+                                  build-side))]
             ;; Probe phase: look up each probe-side binding and merge matches
           (set (mapcat (fn [probe-binding]
                          (let [join-key (select-keys probe-binding common-vars)]
@@ -404,8 +408,8 @@
   (let [query-vec (if (map? query-form)
                     (:query query-form)
                     query-form)
-        find-idx (.indexOf query-vec :find)
-        where-idx (.indexOf query-vec :where)
+        find-idx (.indexOf ^clojure.lang.IPersistentVector query-vec :find)
+        where-idx (.indexOf ^clojure.lang.IPersistentVector query-vec :where)
         find-exprs (subvec query-vec (inc find-idx) where-idx)
         where-clauses (subvec query-vec (inc where-idx))
 

@@ -4,9 +4,11 @@
             [dfdb.dd.simple-incremental :as simple]
             [clojure.set :as set]))
 
+(set! *warn-on-reflection* true)
+
 (defrecord IncrementalJoinOperator [left-state right-state join-vars]
   simple/DeltaOperator
-  (process-delta [this delta]
+  (process-delta [_this delta]
     (let [binding (:binding delta)
           mult (:mult delta)
           source (:source delta :left)]
@@ -40,8 +42,8 @@
   (->IncrementalJoinOperator (atom {}) (atom {}) join-vars))
 
 (defn natural-join-variables [pattern1 pattern2]
-  (let [vars1 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern1)
-        vars2 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern2)]
+  (let [vars1 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern1)
+        vars2 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern2)]
     (vec (filter (set vars1) vars2))))
 
 (defn pattern-clause?
@@ -68,8 +70,8 @@
        (= 2 (count patterns))
        (let [pattern1 (first patterns)
              pattern2 (second patterns)
-             vars1 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern1)
-             vars2 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern2)
+             vars1 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern1)
+             vars2 (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern2)
              join-vars (vec (filter (set vars1) vars2))
 
              pattern-op1 (simple/->PatternOperator pattern1 (atom {}))
@@ -133,14 +135,14 @@
              join-ops (vec (for [i (range 1 (count patterns))]
                              (if (= i 1)
                                ;; First join: P1 ⋈ P2
-                               (let [p1-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?")) (nth patterns 0)))
-                                     p2-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?")) (nth patterns 1)))
+                               (let [p1-vars (set (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) (nth patterns 0)))
+                                     p2-vars (set (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) (nth patterns 1)))
                                      join-vars (vec (set/intersection p1-vars p2-vars))]
                                  (make-incremental-join join-vars))
                                ;; Later joins: Accumulated ⋈ Pi
-                               (let [left-vars (set (mapcat #(filter (fn [x] (and (symbol? x) (.startsWith (name x) "?"))) %)
+                               (let [left-vars (set (mapcat #(filter (fn [x] (and (symbol? x) (.startsWith ^String (name x) "?"))) %)
                                                             (take i patterns)))
-                                     right-vars (set (filter #(and (symbol? %) (.startsWith (name %) "?"))
+                                     right-vars (set (filter #(and (symbol? %) (.startsWith ^String (name %) "?"))
                                                              (nth patterns i)))
                                      join-vars (vec (set/intersection left-vars right-vars))]
                                  (make-incremental-join join-vars)))))
@@ -170,22 +172,22 @@
                     (if (zero? idx)
                      ;; First pattern - feed to first join's left side
                       (let [tagged (map #(assoc % :source :left) pattern-out)
-                            joined (mapcat #(simple/process-delta (first join-ops) %) tagged)]
-                       ;; Chain through remaining joins on LEFT side (accumulated results)
-                        (let [final-deltas
-                              (reduce (fn [deltas join-idx]
-                                        (if (< join-idx (count join-ops))
-                                          (let [join-op (nth join-ops join-idx)
-                                                ;; Tag as LEFT - this is the accumulated result
-                                                tagged (map #(assoc % :source :left) deltas)]
-                                            (mapcat #(simple/process-delta join-op %) tagged))
-                                          deltas))
-                                      joined
-                                      (range 1 (count join-ops)))
-                              filtered (apply-filters final-deltas)
-                              projected (mapcat #(simple/process-delta project-op %) filtered)]
-                          (doseq [p projected]
-                            (simple/process-delta collect-op p))))
+                            joined (mapcat #(simple/process-delta (first join-ops) %) tagged)
+                            ;; Chain through remaining joins on LEFT side (accumulated results)
+                            final-deltas
+                            (reduce (fn [deltas join-idx]
+                                      (if (< join-idx (count join-ops))
+                                        (let [join-op (nth join-ops join-idx)
+                                              ;; Tag as LEFT - this is the accumulated result
+                                              tagged (map #(assoc % :source :left) deltas)]
+                                          (mapcat #(simple/process-delta join-op %) tagged))
+                                        deltas))
+                                    joined
+                                    (range 1 (count join-ops)))
+                            filtered (apply-filters final-deltas)
+                            projected (mapcat #(simple/process-delta project-op %) filtered)]
+                        (doseq [p projected]
+                          (simple/process-delta collect-op p)))
 
                      ;; Later patterns - feed to corresponding join's right side
                       (let [join-idx (dec idx)  ; Pattern 2 goes to join 0's right, Pattern 3 goes to join 1's right, etc.

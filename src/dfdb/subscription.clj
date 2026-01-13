@@ -7,6 +7,8 @@
             [dfdb.transaction :as tx]
             [dfdb.db :as db]))
 
+(set! *warn-on-reflection* true)
+
 (defrecord Subscription
            [id                    ; Unique subscription ID
             query-form            ; Original query
@@ -105,7 +107,7 @@
                     (throw (ex-info "Error in process-deltas"
                                     {:subscription-id (:id subscription)
                                      :query (:query-form subscription)
-                                     :error (.getMessage e)}
+                                     :error (.getMessage ^Exception e)}
                                     e))))
 
               new-results-raw ((:get-results dd-graph))
@@ -132,7 +134,7 @@
           (throw (ex-info "Error in notify-subscription"
                           {:subscription-id (:id subscription)
                            :query (:query-form subscription)
-                           :error (.getMessage e)}
+                           :error (.getMessage ^Exception e)}
                           e)))))))
 
 (defn notify-all-subscriptions
@@ -149,7 +151,7 @@
                                     dim-key (keys delta)
                                     :when (and (keyword? dim-key)
                                                (namespace dim-key)
-                                               (.startsWith (namespace dim-key) "time")
+                                               (.startsWith ^String (namespace dim-key) "time")
                                                (not= dim-key :time/system))]  ; Exclude :time/system
                                 dim-key))
               watch-dims (set (remove #{:time/system} (:watch-dimensions subscription)))  ; Exclude :time/system from watch list too
@@ -163,7 +165,7 @@
           (when should-notify?
             (notify-subscription db subscription deltas force-notify?)))
         (catch Exception e
-          (println "Warning: Failed to notify subscription" (:id subscription) "-" (.getMessage e)))))))
+          (println "Warning: Failed to notify subscription" (:id subscription) "-" (.getMessage ^Exception e)))))))
 
 (defrecord SubscriptionNotifier []
   tx/TransactionListener

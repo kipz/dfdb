@@ -1,7 +1,10 @@
 (ns dfdb.dd.delta-simple
   "Simplified delta model based on xtflow.
   Each delta is {:binding {...} :mult +1/-1}"
-  (:require [dfdb.dd.multiset :as ms]))
+  (:require [dfdb.dd.multiset :as ms]
+            [clojure.set :as set]))
+
+(set! *warn-on-reflection* true)
 
 (defprotocol DeltaOperator
   "Operator that processes deltas incrementally (xtflow-style)."
@@ -59,8 +62,8 @@
             ;; Set-valued attribute: compute set difference
             (let [old-set (if (set? old-value) old-value (if old-value #{old-value} #{}))
                   new-set (if (set? new-value) new-value (if new-value #{new-value} #{}))
-                  removed (clojure.set/difference old-set new-set)
-                  added (clojure.set/difference new-set old-set)]
+                  removed (set/difference old-set new-set)
+                  added (set/difference new-set old-set)]
               ;; Retract elements that were removed (in old but not in new)
               (doseq [elem removed]
                 (swap! binding-deltas conj

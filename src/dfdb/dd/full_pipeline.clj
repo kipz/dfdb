@@ -10,6 +10,8 @@
             [dfdb.query :as query]
             [dfdb.index :as index]))
 
+(set! *warn-on-reflection* true)
+
 (declare add-not-filter)
 
 (defn pattern-clause? [clause]
@@ -37,12 +39,12 @@
   (let [pred-list (if (vector? pred-clause) (first pred-clause) pred-clause)
         [op & args] pred-list]
     (fn [binding]
-      (let [resolved (map #(if (and (symbol? %) (.startsWith (name %) "?"))
+      (let [resolved (map #(if (and (symbol? %) (.startsWith ^String (name %) "?"))
                              (get binding %)
                              %)
                           args)
             comparable (map #(if (instance? java.util.Date %)
-                               (.getTime %)
+                               (.getTime ^java.util.Date %)
                                %)
                             resolved)]
         (apply (case op

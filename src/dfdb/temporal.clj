@@ -2,6 +2,8 @@
   "Temporal query support for multi-dimensional time."
   (:require [dfdb.dimensions :as dims]))
 
+(set! *warn-on-reflection* true)
+
 (defn parse-as-of
   "Parse as-of clause into dimension filters.
   {:time/system #inst '...' :time/valid #inst '...'} -> filters by both"
@@ -22,7 +24,7 @@
     (every? (fn [[dim-name dim-value]]
               (if-let [datom-dim-value (get datom dim-name)]
                 ;; Datom has this dimension - check if value <= filter
-                (<= (.getTime datom-dim-value) (.getTime dim-value))
+                (<= (.getTime ^java.util.Date datom-dim-value) (.getTime ^java.util.Date dim-value))
                 ;; Datom doesn't have this dimension - ALLOW IT (permissive)
                 true))
             as-of-map)))

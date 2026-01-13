@@ -90,7 +90,7 @@
     (instance? Date value)
     (do
       (write-byte bb TYPE-INSTANT)
-      (write-long bb (.getTime ^Date value)))
+      (write-long bb (.getTime ^java.util.Date ^Date value)))
 
     (vector? value)
     (do

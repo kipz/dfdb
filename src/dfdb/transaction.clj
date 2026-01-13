@@ -6,6 +6,8 @@
             [dfdb.dimensions :as dims]
             [clojure.set :as set]))
 
+(set! *warn-on-reflection* true)
+
 (defprotocol TransactionListener
   "Protocol for receiving notifications after successful transactions.
   Listeners are registered on the Database and called after each transaction commits."
@@ -243,12 +245,12 @@
   (let [{:keys [entity attribute index-value _old-value operation time/system tx]} delta
         ;; Use index-value if present (for retracts), otherwise fall back to new-value
         value-for-index (or index-value (:new-value delta))
-        tx-time (.getTime system)
+        tx-time (.getTime ^java.util.Date system)
         tx-id (:tx/id tx)
         ;; Extract all time dimensions from delta
         time-dims (select-keys delta (filter #(and (keyword? %)
                                                    (namespace %)
-                                                   (.startsWith (namespace %) "time"))
+                                                   (.startsWith ^String (namespace %) "time"))
                                              (keys delta)))
         datom (merge (index/datom entity attribute value-for-index tx-time tx-id operation)
                      time-dims)]
@@ -283,12 +285,13 @@
         ;; Validate and enrich time dimensions with entity context
         time-dimensions (dims/enrich-time-dimensions db (or user-time-dims {}) tx-time first-entity)
 
-        ;; Generate deltas
-        deltas (->> tuples
-                    (map (fn [[op e a v]]
-                           (generate-delta db op e a v tempid-map tx-time tx-id tx-meta time-dimensions)))
-                    (filter some?)
-                    (doall))
+        ;; Generate deltas using transducers for better performance
+        deltas (into []
+                     (comp
+                      (map (fn [[op e a v]]
+                             (generate-delta db op e a v tempid-map tx-time tx-id tx-meta time-dimensions)))
+                      (filter some?))
+                     tuples)
 
         ;; Merge tx-meta into deltas
         deltas-with-meta (if tx-meta
@@ -297,11 +300,12 @@
                                 deltas)
                            deltas)
 
-        ;; Apply all deltas to indexes
-        storage-ops (->> deltas-with-meta
-                         (mapcat apply-delta)
-                         (filter some?)
-                         (doall))]
+        ;; Apply all deltas to indexes using transducers
+        storage-ops (into []
+                          (comp
+                           (mapcat apply-delta)
+                           (filter some?))
+                          deltas-with-meta)]
 
     ;; Write to storage
     (storage/batch-write (:storage db) storage-ops)
@@ -312,10 +316,10 @@
         (notify-transaction listener db deltas-with-meta)
         (catch Exception e
           ;; Log but don't fail transaction if listener fails
-          (println "Warning: Transaction listener failed:" (.getMessage e))
-          (.printStackTrace e))))
+          (println "Warning: Transaction listener failed:" (.getMessage ^Exception e))
+          (.printStackTrace ^Exception e))))
 
     ;; Return result
     {:tx-id tx-id
-     :tx-time (java.util.Date. tx-time)
+     :tx-time (java.util.Date. ^long tx-time)
      :deltas deltas-with-meta}))

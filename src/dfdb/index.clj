@@ -2,6 +2,8 @@
   "EAV index management."
   (:require [dfdb.storage :as storage]))
 
+(set! *warn-on-reflection* true)
+
 (defn eavt-key
   "Create EAVT index key: [:eavt entity attribute value tx-id]
   Prefix with index type to avoid collisions between indexes."

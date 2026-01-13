@@ -1,6 +1,8 @@
 (ns dfdb.dd.arrangement
   "Arrangements are indexed representations of collections for efficient joins.")
 
+(set! *warn-on-reflection* true)
+
 (defprotocol Arrangement
   "Arrangement maintains an indexed view of a collection."
   (insert [this key value timestamp multiplicity]

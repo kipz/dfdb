@@ -3,6 +3,8 @@
   (:require [dfdb.storage :as storage]
             [dfdb.index :as index]))
 
+(set! *warn-on-reflection* true)
+
 (defrecord Database [storage  ; Storage backend
                      tx-counter  ; Atom for transaction ID counter
                      entity-id-counter  ; Atom for entity ID counter
@@ -79,7 +81,7 @@
    (entity db eid (current-time)))
   ([db eid as-of-time-or-tx]
    (let [t (if (instance? java.util.Date as-of-time-or-tx)
-             (.getTime as-of-time-or-tx)
+             (.getTime ^java.util.Date as-of-time-or-tx)
              ##Inf)  ; If tx-id, use infinity for time (get all)
          tx-id (if (integer? as-of-time-or-tx)
                  as-of-time-or-tx

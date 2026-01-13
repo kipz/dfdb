@@ -2,6 +2,8 @@
   "Simplified incremental execution based on xtflow delta model."
   (:require [dfdb.dd.delta-simple :as delta]))
 
+(set! *warn-on-reflection* true)
+
 (defprotocol DeltaOperator
   "Operator that processes deltas incrementally (xtflow-style)."
   (process-delta [_this delta]
@@ -18,7 +20,7 @@
     ;; Check if binding matches all constant constraints in pattern
     (let [binding (:binding delta)
           [e _a v] pattern
-          variable? (fn [x] (and (symbol? x) (.startsWith (name x) "?")))]
+          variable? (fn [x] (and (symbol? x) (.startsWith ^String (name x) "?")))]
 
       ;; Pattern constraints:
       ;; - If e is constant (not variable), binding must match

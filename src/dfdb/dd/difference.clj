@@ -2,6 +2,8 @@
   "Difference represents changes to a multiset - additions and retractions."
   (:require [dfdb.dd.multiset :as ms]))
 
+(set! *warn-on-reflection* true)
+
 (deftype Difference [additions retractions]
   ;; additions: {value -> +count}
   ;; retractions: {value -> -count}

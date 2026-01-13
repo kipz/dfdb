@@ -3,6 +3,8 @@
   (:require [dfdb.index :as index]
             [clojure.set :as set]))
 
+(set! *warn-on-reflection* true)
+
 (defn recursive-attribute?
   "Check if attribute is recursive (ends with +)."
   [attr]
@@ -99,8 +101,8 @@
 
         e-bound? (contains? bindings e)
         v-bound? (contains? bindings v)
-        e-is-var? (and (symbol? e) (.startsWith (name e) "?"))
-        v-is-var? (and (symbol? v) (.startsWith (name v) "?"))
+        e-is-var? (and (symbol? e) (.startsWith ^String (name e) "?"))
+        v-is-var? (and (symbol? v) (.startsWith ^String (name v) "?"))
 
         ;; Determine starting point
         e-constant? (and (not e-is-var?) (not e-bound?))
