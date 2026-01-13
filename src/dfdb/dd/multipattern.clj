@@ -192,22 +192,22 @@
                      ;; Later patterns - feed to corresponding join's right side
                       (let [join-idx (dec idx)  ; Pattern 2 goes to join 0's right, Pattern 3 goes to join 1's right, etc.
                             tagged (map #(assoc % :source :right) pattern-out)
-                            joined (mapcat #(simple/process-delta (nth join-ops join-idx) %) tagged)]
-                       ;; Chain output through NEXT joins on LEFT side (this is now accumulated)
-                        (let [final-deltas
-                              (reduce (fn [deltas ji]
-                                        (if (and deltas (< ji (count join-ops)))
-                                          (let [join-op (nth join-ops ji)
-                                                ;; Tag as LEFT for next join - accumulated result
-                                                tagged (map #(assoc % :source :left) deltas)]
-                                            (mapcat #(simple/process-delta join-op %) tagged))
-                                          deltas))
-                                      joined
-                                      (range (inc join-idx) (count join-ops)))
-                              filtered (when final-deltas (apply-filters final-deltas))
-                              projected (when filtered (mapcat #(simple/process-delta project-op %) filtered))]
-                          (doseq [p projected]
-                            (simple/process-delta collect-op p))))))))))
+                            joined (mapcat #(simple/process-delta (nth join-ops join-idx) %) tagged)
+                            ;; Chain output through NEXT joins on LEFT side (this is now accumulated)
+                            final-deltas
+                            (reduce (fn [deltas ji]
+                                      (if (and deltas (< ji (count join-ops)))
+                                        (let [join-op (nth join-ops ji)
+                                              ;; Tag as LEFT for next join - accumulated result
+                                              tagged (map #(assoc % :source :left) deltas)]
+                                          (mapcat #(simple/process-delta join-op %) tagged))
+                                        deltas))
+                                    joined
+                                    (range (inc join-idx) (count join-ops)))
+                            filtered (when final-deltas (apply-filters final-deltas))
+                            projected (when filtered (mapcat #(simple/process-delta project-op %) filtered))]
+                        (doseq [p projected]
+                          (simple/process-delta collect-op p)))))))))
 
           :get-results
           (fn [] (simple/get-results collect-op))
