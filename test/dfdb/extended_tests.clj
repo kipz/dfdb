@@ -273,7 +273,7 @@
       (transact! db [{:counter/value 0}])
 
       ;; 10 sequential increments
-      (dotimes [i 10]
+      (dotimes [_i 10]
         (let [current (:counter/value (entity db 1))]
           (transact! db [[:db/add 1 :counter/value (inc current)]])))
 

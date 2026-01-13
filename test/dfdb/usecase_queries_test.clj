@@ -172,19 +172,18 @@
   (testing "Compliance audit trail with system-time"
     (let [db (create-db)
           ;; Transaction at T1
-          r1 (transact! db [{:account/id "ACC-100" :account/balance 1000}])]
+          r1 (transact! db [{:account/id "ACC-100" :account/balance 1000}])
+          ;; Fraudulent withdrawal at T2
+          r2 (transact! db [[:db/add [:account/id "ACC-100"] :account/balance 500]])]
 
-      ;; Fraudulent withdrawal at T2
-      (let [r2 (transact! db [[:db/add [:account/id "ACC-100"] :account/balance 500]])]
+      ;; Correction at T3
+      (transact! db [[:db/add [:account/id "ACC-100"] :account/balance 1000]])
 
-        ;; Correction at T3
-        (transact! db [[:db/add [:account/id "ACC-100"] :account/balance 1000]])
+      ;; Audit: what was balance at T2?
+      (is (= 500 (:account/balance (entity-by db :account/id "ACC-100" (:tx-id r2)))))
 
-        ;; Audit: what was balance at T2?
-        (is (= 500 (:account/balance (entity-by db :account/id "ACC-100" (:tx-id r2)))))
-
-        ;; Audit: what was balance at T1?
-        (is (= 1000 (:account/balance (entity-by db :account/id "ACC-100" (:tx-id r1)))))))))
+      ;; Audit: what was balance at T1?
+      (is (= 1000 (:account/balance (entity-by db :account/id "ACC-100" (:tx-id r1))))))))
 
 ;; =============================================================================
 ;; Complex Analytical Queries
