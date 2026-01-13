@@ -75,13 +75,34 @@
           (filter (fn [d] (and (<= (:t d) t)  ; wall-clock time constraint
                                (<= (:tx-id d) tx-id))))  ; tx-id constraint
           (group-by :a)  ; group by attribute
-          (map (fn [[a ds]]
-                 ;; Get the most recent value for this attribute
-                 (let [sorted (sort datom-comparator ds)  ; descending by tx-id
-                       latest (first sorted)]
-                   (when (= :assert (:op latest))
-                     [a (:v latest)]))))
-          (filter some?)
+          (mapcat (fn [[a ds]]
+                    ;; For each attribute, find what values are currently asserted
+                    ;; First, check absolute latest datom to detect retractions
+                    (let [sorted-all (sort datom-comparator ds)
+                          absolute-latest (first sorted-all)]
+
+                      (cond
+                        ;; If absolute latest is a retraction with nil value, attribute is empty
+                        (and (= :retract (:op absolute-latest))
+                             (nil? (:v absolute-latest)))
+                        []
+
+                        ;; Otherwise, find all currently asserted values
+                        :else
+                        (let [by-value (group-by :v ds)
+                              value-states (keep (fn [[v value-datoms]]
+                                                   (let [sorted (sort datom-comparator value-datoms)
+                                                         latest (first sorted)]
+                                                     (when (= :assert (:op latest))
+                                                       {:value v :tx-id (:tx-id latest)})))
+                                                 by-value)]
+                          ;; Take values from LATEST transaction
+                          (when (seq value-states)
+                            (let [latest-tx (apply max (map :tx-id value-states))
+                                  latest-values (map :value (filter #(= latest-tx (:tx-id %)) value-states))]
+                              (cond
+                                (> (count latest-values) 1) [[a (set latest-values)]]
+                                :else [[a (first latest-values)]]))))))))
           (into {})))))
 
 (defn scan-eavt

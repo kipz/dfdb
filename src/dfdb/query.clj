@@ -1,7 +1,6 @@
 (ns dfdb.query
   "Basic Datalog query engine."
   (:require [dfdb.index :as index]
-            [dfdb.db :as db]
             [dfdb.temporal :as temporal]
             [dfdb.recursive :as recursive]
             [clojure.set :as set]))
@@ -74,14 +73,42 @@
             with-dimension (if temporal-spec
                              (filter (fn [[_k d]] (get d (:dimension temporal-spec))) filtered)
                              filtered)
-            ;; Get latest datom by tx-id for this attribute
-            latest (first (sort index/datom-comparator (map second with-dimension)))]
-        (if (and latest (= :assert (:op latest)))
-          (let [new-bindings (if v-is-wildcard?
-                               bindings
-                               (assoc bindings v (:v latest)))
-                result (temporal/bind-temporal-value new-bindings latest temporal-spec)]
-            (if result #{result} #{}))  ; Filter out nil results
+            ;; Get ALL datoms after temporal filtering
+            all-datoms (map second with-dimension)
+
+            ;; Group by value to track each EAV separately
+            by-value (group-by :v all-datoms)
+
+            ;; For each value, check if it's currently asserted (latest op = assert)
+            asserted-values (keep (fn [[val value-datoms]]
+                                    (let [sorted (sort index/datom-comparator value-datoms)
+                                          latest (first sorted)]
+                                      (when (= :assert (:op latest))
+                                        {:value val :datom latest :tx-id (:tx-id latest)})))
+                                  by-value)]
+
+        ;; Decision: If :at/ modifier present, return ALL values with dimension
+        ;; (time-series use case). Otherwise, use latest-tx semantics
+        (if (seq asserted-values)
+          (if temporal-spec
+            ;; Time-series mode: return ALL values with dimension
+            (set (keep (fn [{:keys [value datom]}]
+                         (let [new-bindings (if v-is-wildcard?
+                                              bindings
+                                              (assoc bindings v value))
+                               result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
+                           result))
+                       asserted-values))
+            ;; Normal mode: return only values from latest tx
+            (let [latest-tx (apply max (map :tx-id asserted-values))
+                  latest-value-states (filter #(= latest-tx (:tx-id %)) asserted-values)]
+              (set (keep (fn [{:keys [value datom]}]
+                           (let [new-bindings (if v-is-wildcard?
+                                                bindings
+                                                (assoc bindings v value))
+                                 result (temporal/bind-temporal-value new-bindings datom temporal-spec)]
+                             result))
+                         latest-value-states))))
           #{}))
 
       ;; Case 3: [?e :attr "value"] - e variable, v constant
@@ -101,7 +128,7 @@
                    filtered)))
 
       ;; Case 4: [?e :attr ?v] or [?e :attr _] - e variable, v variable/wildcard
-      (and e-is-var?)
+      e-is-var?
       (let [start-key [:aevt a-val]
             end-key [:aevt (index/successor-value a-val)]
             datoms (index/scan-aevt storage start-key end-key)
@@ -113,13 +140,13 @@
         (set (keep (fn [[_k datom]]
                      (when (and (= (:a datom) a-val)
                                 (= :assert (:op datom)))
-                       (let [new-bindings (assoc bindings e (:e datom))]
-                         (let [with-value (if (or v-is-wildcard? v-is-var?)
-                                            (if v-is-wildcard?
-                                              new-bindings
-                                              (assoc new-bindings v (:v datom)))
-                                            new-bindings)]
-                           (temporal/bind-temporal-value with-value datom temporal-spec)))))
+                       (let [new-bindings (assoc bindings e (:e datom))
+                             with-value (if (or v-is-wildcard? v-is-var?)
+                                          (if v-is-wildcard?
+                                            new-bindings
+                                            (assoc new-bindings v (:v datom)))
+                                          new-bindings)]
+                         (temporal/bind-temporal-value with-value datom temporal-spec))))
                    with-dimension)))
 
       :else
@@ -164,7 +191,7 @@
         (if-let [f (resolve pred-fn)]
           (apply f resolved-args)
           (throw (ex-info "Unknown predicate function" {:pred pred-fn}))))
-      (catch Exception e
+      (catch Exception _e
         false))))
 
 (defn apply-predicate
@@ -310,9 +337,19 @@
     ;; No aggregation - simple projection
     (set (map (fn [bindings]
                 (vec (map (fn [expr]
-                            (if (variable? expr)
+                            (cond
+                              ;; Variable - lookup in bindings
+                              (variable? expr)
                               (get bindings expr)
-                              expr))  ; Return constants as-is
+
+                              ;; Expression binding - evaluate
+                              (or (list? expr) (and (vector? expr) (list? (first expr))))
+                              (let [expr-list (if (vector? expr) (first expr) expr)]
+                                (eval-predicate expr-list bindings))
+
+                              ;; Constant
+                              :else
+                              expr))
                           find-exprs)))
               bindings-set))
     ;; With aggregation - group and aggregate
@@ -320,9 +357,16 @@
                     {nil bindings-set}  ; No grouping - aggregate all
                     (group-by (fn [bindings]
                                 (vec (map (fn [expr]
-                                            (if (variable? expr)
+                                            (cond
+                                              (variable? expr)
                                               (get bindings expr)
-                                              expr))  ; Handle constants
+
+                                              (or (list? expr) (and (vector? expr) (list? (first expr))))
+                                              (let [expr-list (if (vector? expr) (first expr) expr)]
+                                                (eval-predicate expr-list bindings))
+
+                                              :else
+                                              expr))
                                           group-vars)))
                               bindings-set))]
       (set (for [[group-key group-bindings] grouped]

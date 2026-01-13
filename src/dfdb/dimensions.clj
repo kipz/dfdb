@@ -1,8 +1,9 @@
 (ns dfdb.dimensions
   "Multi-dimensional time support."
   (:require [dfdb.db :as db]
-            [dfdb.index :as index]
-            [clojure.string :as str]))
+            [dfdb.index :as index]))
+
+(declare get-entity-dimensions)
 
 (def system-time-dimension
   "Built-in system-time dimension (always present, immutable)."
@@ -59,7 +60,7 @@
 (defn validate-derived-dimension
   "Validate and compute derived dimension value.
   Derivation: {:op :minus :operands [:time/delivered :time/shipped]}"
-  [db derivation time-dimensions]
+  [_db derivation time-dimensions]
   (let [{:keys [op operands]} derivation]
     (case op
       :minus
@@ -73,7 +74,7 @@
   "Validate all constraints for dimension definitions in time-dimensions map."
   [db time-dimensions]
   ;; Check each dimension has constraints
-  (doseq [[dim-name dim-value] time-dimensions]
+  (doseq [[dim-name _dim-value] time-dimensions]
     (when-not (= dim-name :time/system)
       (when-let [dim (get-dimension db dim-name)]
         (when-let [constraints (:dimension/constraints dim)]
@@ -113,7 +114,7 @@
   [db time-dimensions]
   (let [all-dims (atom time-dimensions)]
     ;; Check each dimension that was provided
-    (doseq [[dim-name dim-value] time-dimensions]
+    (doseq [[dim-name _dim-value] time-dimensions]
       (when-let [dim (get-dimension db dim-name)]
         (when-let [derivation (:dimension/derived-from dim)]
           (when-let [computed (validate-derived-dimension db derivation @all-dims)]

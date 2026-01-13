@@ -1,7 +1,6 @@
 (ns dfdb.temporal
   "Temporal query support for multi-dimensional time."
-  (:require [dfdb.index :as index]
-            [dfdb.dimensions :as dims]))
+  (:require [dfdb.dimensions :as dims]))
 
 (defn parse-as-of
   "Parse as-of clause into dimension filters.

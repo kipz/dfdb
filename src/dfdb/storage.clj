@@ -17,6 +17,53 @@
     "Apply multiple operations atomically.
     ops is seq of [:put key value] or [:delete key]"))
 
+(defprotocol StreamingStorage
+  "Optional protocol for storage backends that support streaming scans."
+  (scan-stream [this start-key end-key opts]
+    "Scan range lazily as a stream. Returns lazy seq of [key value] pairs."))
+
+(defprotocol StorageLifecycle
+  "Optional protocol for storage backends that support lifecycle management."
+  (close [this]
+    "Close the storage backend and release resources.")
+  (snapshot [this]
+    "Create a snapshot of the current state. Returns snapshot handle.")
+  (restore-snapshot [this snapshot-id]
+    "Restore storage to a previous snapshot state. Returns new storage instance.")
+  (compact [this]
+    "Compact the storage to reclaim space and optimize performance."))
+
+(defn try-require-namespace
+  "Attempt to require a namespace and resolve a function.
+  Returns the function or throws an informative error.
+
+  Args:
+    ns-sym - Namespace symbol to require
+    fn-sym - Fully qualified function symbol to resolve
+    context-info - Map of contextual information for error messages
+
+  Throws:
+    ExceptionInfo with actionable error message if namespace not found"
+  [ns-sym fn-sym context-info]
+  (try
+    (require ns-sym)
+    (or (resolve fn-sym)
+        (throw (ex-info (str "Function not found after requiring namespace: " fn-sym)
+                        (assoc context-info
+                               :namespace ns-sym
+                               :function fn-sym))))
+    (catch java.io.FileNotFoundException e
+      (throw (ex-info (str "Storage backend not available: " ns-sym)
+                      (assoc context-info
+                             :namespace ns-sym
+                             :note "Add the required dependency to deps.edn if needed"
+                             :original-error (.getMessage e))
+                      e)))
+    (catch Exception e
+      (throw (ex-info (str "Failed to load storage backend: " ns-sym)
+                      (assoc context-info :namespace ns-sym)
+                      e)))))
+
 (defn compare-values
   "Compare two values of potentially different types.
   Order: nil < numbers < strings < keywords < other"
@@ -57,16 +104,16 @@
               (recur (inc i))
               cmp)))))))
 
-(deftype MemoryStorage [data-atom]
+(deftype MemoryStorage [data-atom snapshots-atom]
   Storage
   (put [this key value]
     (swap! data-atom assoc key value)
     this)
 
-  (get-value [this key]
+  (get-value [_this key]
     (get @data-atom key))
 
-  (scan [this start-key end-key]
+  (scan [_this start-key end-key]
     (->> @data-atom
          (filter (fn [[k _]]
                    (and (>= (compare-keys k start-key) 0)
@@ -86,9 +133,27 @@
                          :delete (dissoc d (second op))))
                      data
                      ops)))
-    this))
+    this)
+
+  StorageLifecycle
+  (close [_this]
+    nil)
+
+  (snapshot [_this]
+    (let [snapshot-id (str (java.util.UUID/randomUUID))
+          snapshot-data @data-atom]
+      (swap! snapshots-atom assoc snapshot-id snapshot-data)
+      snapshot-id))
+
+  (restore-snapshot [_this snapshot-id]
+    (if-let [snapshot-data (get @snapshots-atom snapshot-id)]
+      (MemoryStorage. (atom snapshot-data) snapshots-atom)
+      (throw (ex-info "Snapshot not found" {:snapshot-id snapshot-id}))))
+
+  (compact [_this]
+    nil))
 
 (defn create-memory-storage
   "Create a new in-memory storage backend."
   []
-  (MemoryStorage. (atom (sorted-map-by compare-keys))))
+  (MemoryStorage. (atom (sorted-map-by compare-keys)) (atom {})))

@@ -1,0 +1,100 @@
+(ns dfdb.dd.simple-incremental
+  "Simplified incremental execution based on xtflow delta model."
+  (:require [dfdb.dd.delta-simple :as delta]))
+
+(defprotocol DeltaOperator
+  "Operator that processes deltas incrementally (xtflow-style)."
+  (process-delta [_this delta]
+    "Process a delta and return output deltas."))
+
+(defrecord PatternOperator [pattern state]
+  ;; Matches pattern against binding deltas
+  ;; Since we already have bindings from transaction-deltas-to-binding-deltas,
+  ;; this is mostly pass-through with filtering
+
+  DeltaOperator
+  (process-delta [_ delta]
+    ;; Delta is {:binding {...} :mult +1/-1}
+    ;; For now, just pass through
+    ;; TODO: Filter based on pattern constraints
+    [delta]))
+
+(defrecord ProjectOperator [find-vars state]
+  ;; Projects bindings to find variables
+
+  DeltaOperator
+  (process-delta [_ delta]
+    (let [binding (:binding delta)
+          mult (:mult delta)
+          ;; Project to find vars
+          projected (vec (map #(get binding %) find-vars))]
+      [(delta/make-delta projected mult)])))
+
+(defrecord PredicateFilter [pred-fn]
+  ;; Filters deltas based on predicate function
+
+  DeltaOperator
+  (process-delta [_this delta]
+    (let [binding (:binding delta)]
+      (if (try (pred-fn binding) (catch Exception _e false))
+        [delta]
+        []))))
+
+(defrecord CollectResults [state]
+  ;; Accumulates deltas into final result set
+
+  DeltaOperator
+  (process-delta [_this delta]
+    (let [value (:binding delta)
+          mult (:mult delta)]
+      ;; Update accumulated state
+      (swap! (:accumulated state) update value (fnil + 0) mult)
+      ;; Return empty - this is terminal
+      []))
+
+  Object
+  (toString [_]
+    (str "CollectResults: " (count @(:accumulated state)) " items")))
+
+(defn get-results
+  "Get current results from CollectResults operator."
+  [collect-op]
+  (let [accumulated @(:accumulated (:state collect-op))]
+    (set (mapcat (fn [[value count]]
+                   (when (pos? count)
+                     (repeat count value)))
+                 accumulated))))
+
+(defn make-simple-pipeline
+  "Create simple operator pipeline for single-pattern query.
+  Returns {:process-deltas-fn get-results-fn}."
+  [pattern find-vars]
+
+  (let [;; Create operators
+        pattern-op (->PatternOperator pattern (atom {}))
+        project-op (->ProjectOperator find-vars (atom {}))
+        collect-op (->CollectResults {:accumulated (atom {})})
+
+        ;; Chain: pattern -> project -> collect
+        process-chain (fn [delta]
+                        (->> [delta]
+                             (mapcat #(process-delta pattern-op %))
+                             (mapcat #(process-delta project-op %))
+                             (mapcat #(process-delta collect-op %))))]
+
+    {:process-deltas
+     (fn [tx-deltas]
+       ;; Convert transaction deltas to binding deltas
+       (let [binding-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)]
+         ;; Process through pipeline
+         (doseq [d binding-deltas]
+           (process-chain d))))
+
+     :get-results
+     (fn []
+       (get-results collect-op))
+
+     :operators
+     {:pattern pattern-op
+      :project project-op
+      :collect collect-op}}))

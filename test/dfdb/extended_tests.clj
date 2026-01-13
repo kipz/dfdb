@@ -97,11 +97,11 @@
                      {:user/id 2 :user/name "Bob" :user/age 25}])
 
       ;; Mixed operations
-      (let [result (transact! db
-                              [[:db/add 1 :user/name "Alice Smith"]  ; update
-                               [:db/retract 1 :user/age 30]          ; retract
-                               [:db/add 2 :user/email "bob@example.com"]  ; add new attr
-                               {:user/id 3 :user/name "Charlie"}])]  ; new entity
+      (let [_result (transact! db
+                               [[:db/add 1 :user/name "Alice Smith"]  ; update
+                                [:db/retract 1 :user/age 30]          ; retract
+                                [:db/add 2 :user/email "bob@example.com"]  ; add new attr
+                                {:user/id 3 :user/name "Charlie"}])]  ; new entity
 
         ;; Verify results
         (is (= "Alice Smith" (:user/name (entity db 1))))
@@ -183,37 +183,35 @@
 
 (deftest test-entity-at-specific-time
   (testing "Query entity at specific transaction (by tx-id for precision)"
-    (let [db (create-db)]
+    (let [db (create-db)
+          result1 (transact! db [{:user/name "Alice" :user/age 30}])
+          result2 (transact! db [[:db/add 1 :user/age 31]])
+          result3 (transact! db [[:db/add 1 :user/age 32]])]
 
-      (let [result1 (transact! db [{:user/name "Alice" :user/age 30}])
-            result2 (transact! db [[:db/add 1 :user/age 31]])
-            result3 (transact! db [[:db/add 1 :user/age 32]])]
+      ;; Query at specific transaction IDs (precise, no millisecond ambiguity)
+      (is (= 30 (:user/age (entity db 1 (:tx-id result1)))))
+      (is (= 31 (:user/age (entity db 1 (:tx-id result2)))))
+      (is (= 32 (:user/age (entity db 1 (:tx-id result3)))))
+      (is (= 32 (:user/age (entity db 1)))  ; Current time
 
-        ;; Query at specific transaction IDs (precise, no millisecond ambiguity)
-        (is (= 30 (:user/age (entity db 1 (:tx-id result1)))))
-        (is (= 31 (:user/age (entity db 1 (:tx-id result2)))))
-        (is (= 32 (:user/age (entity db 1 (:tx-id result3)))))
-        (is (= 32 (:user/age (entity db 1))))  ; Current time
-
-        ;; Can also query by wall-clock time
-        (is (= 32 (:user/age (entity db 1 (:tx-time result3)))))))))
+      ;; Can also query by wall-clock time
+          (is (= 32 (:user/age (entity db 1 (:tx-time result3)))))))))
 
 (deftest test-attribute-history
   (testing "Track history of attribute changes over time"
-    (let [db (create-db)]
-      ;; Create user and track each transaction ID
-      (let [r1 (transact! db [{:user/name "Alice" :user/status :pending}])
-            r2 (transact! db [[:db/add 1 :user/status :active]])
-            r3 (transact! db [[:db/add 1 :user/status :inactive]])
-            r4 (transact! db [[:db/add 1 :user/status :archived]])]
+    (let [db (create-db)
+          ;; Create user and track each transaction ID
+          r1 (transact! db [{:user/name "Alice" :user/status :pending}])
+          r2 (transact! db [[:db/add 1 :user/status :active]])
+          r3 (transact! db [[:db/add 1 :user/status :inactive]])
+          r4 (transact! db [[:db/add 1 :user/status :archived]])]
 
-        ;; Query at each transaction (by tx-id for precision)
-        (is (= :pending (:user/status (entity db 1 (:tx-id r1)))))
-        (is (= :active (:user/status (entity db 1 (:tx-id r2)))))
-        (is (= :inactive (:user/status (entity db 1 (:tx-id r3)))))
-        (is (= :archived (:user/status (entity db 1 (:tx-id r4)))))
-        (is (= :archived (:user/status (entity db 1))))  ; Current time
-        ))))
+      ;; Query at each transaction (by tx-id for precision)
+      (is (= :pending (:user/status (entity db 1 (:tx-id r1)))))
+      (is (= :active (:user/status (entity db 1 (:tx-id r2)))))
+      (is (= :inactive (:user/status (entity db 1 (:tx-id r3)))))
+      (is (= :archived (:user/status (entity db 1 (:tx-id r4)))))
+      (is (= :archived (:user/status (entity db 1)))))))
 
 ;; =============================================================================
 ;; Transaction Metadata

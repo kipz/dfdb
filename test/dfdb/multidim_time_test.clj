@@ -143,14 +143,13 @@
                               {:tx-data [{:order/id 100}]
                                :time-dimensions {:time/ordered #inst "2026-01-01"
                                                  :time/shipped #inst "2026-01-05"
-                                                 :time/delivered #inst "2026-01-10"}})]
-
-        ;; All dimensions in delta
-        (let [delta (first (:deltas result))]
-          (is (inst? (:time/system delta)))
-          (is (= #inst "2026-01-01" (:time/ordered delta)))
-          (is (= #inst "2026-01-05" (:time/shipped delta)))
-          (is (= #inst "2026-01-10" (:time/delivered delta))))))))
+                                                 :time/delivered #inst "2026-01-10"}})
+            ;; All dimensions in delta
+            delta (first (:deltas result))]
+        (is (inst? (:time/system delta)))
+        (is (= #inst "2026-01-01" (:time/ordered delta)))
+        (is (= #inst "2026-01-05" (:time/shipped delta)))
+        (is (= #inst "2026-01-10" (:time/delivered delta)))))))
 
 (deftest test-undefined-time-dimension-error
   (testing "Using undefined time dimension fails"

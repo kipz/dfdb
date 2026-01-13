@@ -20,7 +20,7 @@
   "Compute transitive closure for recursive attribute.
   Starting from initial-bindings, follow attribute relationships.
   Returns set of all reachable bindings."
-  [db initial-bindings recursive-attr entity-var value-var as-of-map max-depth]
+  [db initial-bindings recursive-attr entity-var value-var _as-of-map max-depth]
   (let [base-attr (base-attribute recursive-attr)
         storage (:storage db)]
     (loop [frontier initial-bindings

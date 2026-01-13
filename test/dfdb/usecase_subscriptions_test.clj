@@ -3,6 +3,8 @@
   Demonstrates differential dataflow subscriptions for real-time updates.
   These tests define expected behavior for Phase 3 implementation."
   (:require [clojure.test :refer :all]
+            [clojure.set :as set]
+            [clojure.core.async :as async]
             [dfdb.core :refer :all]))
 
 ;; =============================================================================
