@@ -60,7 +60,7 @@
 (defn inverse-transitive-closure
   "Compute inverse transitive closure - find all entities that reach target.
   For [?source :attr+ target], finds all ?source that have path to target."
-  [db target-bindings recursive-attr source-var target-var as-of-map max-depth]
+  [db target-bindings recursive-attr source-var target-var _as-of-map max-depth]
   (let [base-attr (base-attribute recursive-attr)
         storage (:storage db)
         target-val (get (first target-bindings) target-var)]

@@ -2,7 +2,7 @@
   "RocksDB storage backend implementation."
   (:require [dfdb.storage :as storage]
             [dfdb.storage.codec :as codec])
-  (:import [org.rocksdb RocksDB Options WriteBatch WriteOptions RocksIterator ReadOptions Snapshot
+  (:import [org.rocksdb RocksDB Options WriteBatch WriteOptions RocksIterator
             CompressionType BlockBasedTableConfig]))
 
 (set! *warn-on-reflection* true)
@@ -56,7 +56,7 @@
       (.put db k v)
       this))
 
-  (get-value [this key]
+  (get-value [_this key]
     (when closed?
       (throw (ex-info "Storage is closed" {:path path})))
     (let [k (codec/encode-key key)
@@ -64,7 +64,7 @@
       (when v-bytes
         (codec/decode-value v-bytes))))
 
-  (scan [this start-key end-key]
+  (scan [_this start-key end-key]
     (when closed?
       (throw (ex-info "Storage is closed" {:path path})))
     (let [start-bytes (codec/encode-key start-key)
@@ -106,7 +106,7 @@
     this)
 
   storage/StorageLifecycle
-  (close [this]
+  (close [_this]
     (when-not closed?
       (set! closed? true)
       (when options
@@ -115,7 +115,7 @@
         (.close db)))
     nil)
 
-  (snapshot [this]
+  (snapshot [_this]
     (when closed?
       (throw (ex-info "Storage is closed" {:path path})))
     (let [snapshot (.getSnapshot db)]
@@ -123,14 +123,14 @@
       ;; In a full implementation, you'd track snapshots and allow reads from them
       snapshot))
 
-  (restore-snapshot [this snapshot-id]
+  (restore-snapshot [_this snapshot-id]
     ;; RocksDB snapshots are more complex - this is a simplified stub
     ;; Full implementation would require tracking snapshots and creating readers with snapshot options
     (throw (ex-info "restore-snapshot not fully implemented for RocksDB"
                     {:snapshot-id snapshot-id
                      :note "Use snapshot handles with ReadOptions for point-in-time reads"})))
 
-  (compact [this]
+  (compact [_this]
     (when closed?
       (throw (ex-info "Storage is closed" {:path path})))
     ;; Compact entire database
@@ -138,7 +138,7 @@
     nil)
 
   storage/StreamingStorage
-  (scan-stream [this start-key end-key opts]
+  (scan-stream [_this start-key end-key _opts]
     (when closed?
       (throw (ex-info "Storage is closed" {:path path})))
     (let [start-bytes (codec/encode-key start-key)

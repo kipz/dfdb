@@ -9,6 +9,8 @@
             [dfdb.dd.recursive-incremental :as rec]
             [dfdb.query :as query]))
 
+(declare add-not-filter)
+
 (defn pattern-clause? [clause]
   (and (vector? clause)
        (not (list? (first clause)))
@@ -133,46 +135,47 @@
             ((:process-deltas base) tx-deltas)
 
            ;; Get intermediate results (tuples)
-            (let [intermediate ((:get-results base))]
-             ;; Convert to multiset
-              (let [ms (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))]
-               ;; Feed to aggregate operator
-                (op/input agg-op ms (System/currentTimeMillis))
+            (let [intermediate ((:get-results base))
+                  ;; Convert to multiset
+                  ms (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))]
+              ;; Feed to aggregate operator
+              (op/input agg-op ms (System/currentTimeMillis))
 
-               ;; Extract aggregated results from operator state
-               ;; State is {timestamp {group-key agg-value}}
-                (let [agg-state @(:aggregates (:state agg-op))
-                      latest-timestamp (when (seq agg-state) (apply max (keys agg-state)))
-                      agg-results (when latest-timestamp
-                                    (let [aggregates (get agg-state latest-timestamp)]
-                                    ;; Convert {[customer] sum} to [[customer sum]]
-                                      (map (fn [[group-key agg-val]]
-                                             (vec (concat group-key [agg-val])))
-                                           aggregates)))]
-                 ;; Reset and feed to collect
-                  (reset! (:accumulated (:state collect-agg)) {})
-                  (doseq [result agg-results]
-                    (let [d (delta/make-delta result 1)]
-                      (simple/process-delta collect-agg d)))))))
+              ;; Extract aggregated results from operator state
+              ;; State is {timestamp {group-key agg-value}}
+              (let [agg-state @(:aggregates (:state agg-op))
+                    latest-timestamp (when (seq agg-state) (apply max (keys agg-state)))
+                    aggregates (when latest-timestamp (get agg-state latest-timestamp))
+                    ;; Convert {[customer] sum} to [[customer sum]]
+                    agg-results (when aggregates
+                                  (map (fn [[group-key agg-val]]
+                                         (vec (concat group-key [agg-val])))
+                                       aggregates))]
+                ;; Reset and feed to collect
+                (reset! (:accumulated (:state collect-agg)) {})
+                (doseq [result agg-results]
+                  (let [d (delta/make-delta result 1)]
+                    (simple/process-delta collect-agg d))))))
 
           :get-results
           (fn [] (simple/get-results collect-agg))})
 
-      ;; NOT clauses - not supported
-       (seq not-clauses)
-       (throw (ex-info "NOT queries not yet supported"
-                       {:query query-form}))
-
-      ;; Pure patterns with optional predicates
+      ;; Pure patterns with optional predicates and/or NOT clauses
        (seq pure-patterns)
        (let [;; Create predicate filter operators
              pred-filters (make-predicate-filters predicates)
-            ;; Build pipeline with predicates integrated
-             pipeline (mp/make-multi-pattern-pipeline pure-patterns find pred-filters)]
-         (if-not pipeline
+            ;; Build base pipeline with predicates integrated
+             base-pipeline (mp/make-multi-pattern-pipeline pure-patterns find pred-filters)]
+         (if-not base-pipeline
            (throw (ex-info "Could not build pattern pipeline"
                            {:query query-form}))
-           pipeline))
+           ;; Wrap with NOT filters if needed
+           (if (seq not-clauses)
+             (reduce (fn [pipeline not-clause]
+                       (add-not-filter pipeline not-clause))
+                     base-pipeline
+                     not-clauses)
+             base-pipeline)))
 
       ;; No patterns
        :else
@@ -210,9 +213,7 @@
         base-get (:get-results base-pipeline)
 
         ;; Build pipeline for NOT pattern to track what matches
-        not-pipeline (try
-                       (mp/make-multi-pattern-pipeline [not-pattern] [])
-                       (catch Exception _e nil))
+        not-pipeline (mp/make-multi-pattern-pipeline [not-pattern] [])
 
         filtered-collect (simple/->CollectResults {:accumulated (atom {})})]
 

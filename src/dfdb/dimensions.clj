@@ -100,13 +100,16 @@
 (defn get-all-dimensions
   "Get all defined dimensions from database."
   [db]
-  ;; Query for all dimension entities
-  ;; For now, we'll check known dimension names
-  ;; In a real implementation, we'd query: (query db '[:find ?dim :where [?dim :dimension/name _]])
-  ;; But that creates a circular dependency
-  ;; So we'll just look for dimensions that might exist
-  []  ; Placeholder - would need to scan storage
-  )
+  (let [storage (:storage db)
+        start-key [:avet :dimension/name]
+        end-key [:avet (index/successor-value :dimension/name)]]
+    ;; Scan for all entities with :dimension/name attribute
+    (->> (index/scan-avet storage start-key end-key)
+         (map (fn [[_k datom]] (:e datom)))
+         (distinct)
+         (map #(db/entity db %))
+         (filter some?)
+         (cons system-time-dimension))))
 
 (defn compute-derived-dimensions
   "Compute values for derived dimensions based on time-dimensions map.
@@ -121,13 +124,13 @@
             (swap! all-dims assoc (:dimension/name dim) computed)))))
 
     ;; Also check for derived dimensions that might exist but weren't provided
-    ;; For now, let's check common derived dimension names
-    ;; TODO: Properly query for all dimensions with derivations
-    (doseq [potential-dim-name [:time/delivery-duration :time/duration :time/elapsed]]
-      (when-let [dim (get-dimension db potential-dim-name)]
-        (when-let [derivation (:dimension/derived-from dim)]
-          (when-let [computed (validate-derived-dimension db derivation @all-dims)]
-            (swap! all-dims assoc (:dimension/name dim) computed)))))
+    ;; Query for all dimensions with derivations
+    (doseq [dim (get-all-dimensions db)]
+      (when-let [derivation (:dimension/derived-from dim)]
+        (let [dim-name (:dimension/name dim)]
+          (when-not (contains? @all-dims dim-name)
+            (when-let [computed (validate-derived-dimension db derivation @all-dims)]
+              (swap! all-dims assoc dim-name computed))))))
 
     @all-dims))
 

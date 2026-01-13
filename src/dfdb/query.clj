@@ -5,6 +5,38 @@
             [dfdb.recursive :as recursive]
             [clojure.set :as set]))
 
+(def predicate-fns
+  "Static map of supported predicate functions."
+  {'= =
+   '!= not=
+   'not= not=
+   '< <
+   '> >
+   '<= <=
+   '>= >=
+   '+ +
+   '- -
+   '* *
+   '/ /
+   'mod mod
+   'quot quot
+   'rem rem
+   'inc inc
+   'dec dec
+   'max max
+   'min min
+   'str str
+   'count count
+   'empty? empty?
+   'nil? nil?
+   'some? some?
+   'true? true?
+   'false? false?
+   'boolean boolean
+   'not not
+   'and (fn [& args] (every? identity args))
+   'or (fn [& args] (some identity args))})
+
 (defn variable?
   "Check if symbol is a query variable (starts with ?)."
   [x]
@@ -171,26 +203,11 @@
         ;; Convert Dates to millis for arithmetic/comparison
         comparable-args (map to-comparable resolved-args)]
     (try
-      (cond
-        ;; Comparison operators
-        (= pred-fn '>) (apply > comparable-args)
-        (= pred-fn '<) (apply < comparable-args)
-        (= pred-fn '>=) (apply >= comparable-args)
-        (= pred-fn '<=) (apply <= comparable-args)
-        (= pred-fn '=) (apply = comparable-args)
-        (= pred-fn 'not=) (apply not= comparable-args)
-
-        ;; Arithmetic
-        (= pred-fn '+) (apply + comparable-args)
-        (= pred-fn '-) (apply - comparable-args)
-        (= pred-fn '*) (apply * comparable-args)
-        (= pred-fn '/) (apply / comparable-args)
-
-        ;; Try to resolve as function
-        :else
-        (if-let [f (resolve pred-fn)]
-          (apply f resolved-args)
-          (throw (ex-info "Unknown predicate function" {:pred pred-fn}))))
+      (if-let [f (get predicate-fns pred-fn)]
+        (apply f comparable-args)
+        (throw (ex-info "Unknown predicate function"
+                        {:pred pred-fn
+                         :supported-predicates (keys predicate-fns)})))
       (catch Exception _e
         false))))
 
@@ -276,7 +293,7 @@
 
     ;; Pattern: [e a v] or [e a+ v] (recursive)
     (vector? clause)
-    (let [[e a _v] clause]
+    (let [[_e a _v] clause]
       (if (recursive/recursive-attribute? a)
         ;; Recursive pattern
         (if (empty? bindings-set)

@@ -1,11 +1,12 @@
 (ns dfdb.dd.multipattern
   "Multi-pattern incremental execution with joins."
   (:require [dfdb.dd.delta-simple :as delta]
-            [dfdb.dd.simple-incremental :as simple]))
+            [dfdb.dd.simple-incremental :as simple]
+            [clojure.set :as set]))
 
 (defrecord IncrementalJoinOperator [left-state right-state join-vars]
   simple/DeltaOperator
-  (process-delta [this delta]
+  (process-delta [_this delta]
     (let [binding (:binding delta)
           mult (:mult delta)
           source (:source delta :left)]
@@ -63,8 +64,8 @@
        (= 1 (count patterns))
        (simple/make-simple-pipeline (first patterns) find-vars)
 
-      ;; Two or more patterns - incremental joins
-       (>= (count patterns) 2)
+      ;; Two patterns - incremental join
+       (= 2 (count patterns))
        (let [pattern1 (first patterns)
              pattern2 (second patterns)
              vars1 (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern1)
@@ -122,6 +123,94 @@
            :project project-op
            :collect collect-op}})
 
-      ;; More than 2 patterns - not yet supported
+      ;; Three or more patterns - recursively build left-deep join tree
+      ;; Strategy: ((P1 ⋈ P2) ⋈ P3) ⋈ P4 ...
+       (> (count patterns) 2)
+       (let [;; Get all variables from all patterns to use as intermediate projection
+             all-vars (vec (distinct (apply concat
+                                            (map #(filter (fn [x] (and (symbol? x) (.startsWith (name x) "?"))) %)
+                                                 patterns))))
+
+             ;; Build pipeline for first two patterns
+             first-two-pipeline (make-multi-pattern-pipeline
+                                 (take 2 patterns)
+                                 all-vars
+                                 predicate-filters)
+
+             ;; Recursively build join tree: join result of first two with remaining patterns
+             ;; We create a synthetic pattern from the joined results and join with next pattern
+             remaining-patterns (drop 2 patterns)
+
+             ;; Create operators for remaining patterns
+             remaining-ops (mapv (fn [p] (simple/->PatternOperator p (atom {}))) remaining-patterns)
+
+             ;; Build chain of joins
+             collect-op (simple/->CollectResults {:accumulated (atom {})})]
+
+         (when first-two-pipeline
+           {:process-deltas
+            (fn [tx-deltas]
+              ;; Process first two patterns
+              ((:process-deltas first-two-pipeline) tx-deltas)
+              (let [intermediate-results ((:get-results first-two-pipeline))]
+
+                ;; Reset collect
+                (reset! (:accumulated (:state collect-op)) {})
+
+                ;; For each remaining pattern, simulate a join
+                ;; This is a simplified implementation - proper DD would maintain arrangements
+                (let [final-results
+                      (reduce
+                       (fn [current-results [idx pattern]]
+                         (let [pattern-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)
+                               pattern-op (nth remaining-ops idx)
+
+                               ;; Get all bindings from pattern
+                               pattern-bindings (set
+                                                 (mapcat
+                                                  (fn [d]
+                                                    (let [out (simple/process-delta pattern-op d)]
+                                                      (map :binding out)))
+                                                  pattern-deltas))
+
+                               ;; Find common variables between current results and pattern
+                               current-vars (when (seq current-results) (set (keys (first current-results))))
+                               pattern-vars (when (seq pattern-bindings) (set (keys (first pattern-bindings))))
+                               common-vars (set/intersection current-vars pattern-vars)
+
+                               ;; Join current results with pattern bindings
+                               joined (if (empty? common-vars)
+                                        ;; Cross product
+                                        (set (for [r current-results
+                                                   b pattern-bindings]
+                                               (merge r b)))
+                                        ;; Natural join on common variables
+                                        (set (for [r current-results
+                                                   b pattern-bindings
+                                                   :when (every? #(= (get r %) (get b %)) common-vars)]
+                                               (merge r b))))]
+                           joined))
+                       intermediate-results
+                       (map-indexed vector remaining-patterns))
+
+                      ;; Apply predicate filters and project to find vars
+                      filtered (if (empty? predicate-filters)
+                                 final-results
+                                 (reduce
+                                  (fn [results filter-op]
+                                    (set (filter #(seq (simple/process-delta filter-op (delta/make-delta % 1)))
+                                                 results)))
+                                  final-results
+                                  predicate-filters))
+
+                      projected (set (map #(vec (map (fn [v] (get % v)) find-vars)) filtered))]
+
+                  ;; Feed to collector
+                  (doseq [result projected]
+                    (simple/process-delta collect-op (delta/make-delta result 1))))))
+
+            :get-results
+            (fn [] (simple/get-results collect-op))}))
+
        :else
        nil))))

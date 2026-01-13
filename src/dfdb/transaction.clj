@@ -3,7 +3,8 @@
   (:require [dfdb.storage :as storage]
             [dfdb.index :as index]
             [dfdb.db :as db]
-            [dfdb.dimensions :as dims]))
+            [dfdb.dimensions :as dims]
+            [clojure.set :as set]))
 
 (defprotocol TransactionListener
   "Protocol for receiving notifications after successful transactions.
@@ -119,7 +120,7 @@
 
 (defn eav-exists?
   "Check if a specific EAV triple currently exists."
-  [db e a v tx-time]
+  [db e a v _tx-time]
   (let [start-key [:eavt e a v]
         end-key [:eavt e a (index/successor-value v)]
         datoms (index/scan-eavt (:storage db) start-key end-key)
@@ -131,7 +132,7 @@
   "Resolve value if it's a lookup ref.
   NOTE: Tempids only apply to entity IDs, not attribute values.
   Negative numbers in values are legitimate data."
-  [db v tempid-map tx-time]
+  [db v _tempid-map tx-time]
   (cond
     (lookup-ref? v)
     (if-let [resolved (index/lookup-ref (:storage db) v tx-time)]
@@ -161,7 +162,7 @@
                                     ;; New value is a set - merge with existing set
                                     (set? v-resolved)
                                     [(if (set? current-value)
-                                       (clojure.set/union current-value v-resolved)
+                                       (set/union current-value v-resolved)
                                        v-resolved)
                                      :assert]
 

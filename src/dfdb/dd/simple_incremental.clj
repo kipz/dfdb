@@ -15,9 +15,19 @@
   DeltaOperator
   (process-delta [_ delta]
     ;; Delta is {:binding {...} :mult +1/-1}
-    ;; For now, just pass through
-    ;; TODO: Filter based on pattern constraints
-    [delta]))
+    ;; Check if binding matches all constant constraints in pattern
+    (let [binding (:binding delta)
+          [e _a v] pattern
+          variable? (fn [x] (and (symbol? x) (.startsWith (name x) "?")))]
+
+      ;; Pattern constraints:
+      ;; - If e is constant (not variable), binding must match
+      ;; - If v is constant (not variable/wildcard), binding must match
+      ;; - Attribute is already filtered by transaction-deltas-to-binding-deltas
+      (if (and (or (variable? e) (= (get binding e) e))
+               (or (variable? v) (= '_ v) (= (get binding v) v)))
+        [delta]
+        []))))
 
 (defrecord ProjectOperator [find-vars state]
   ;; Projects bindings to find variables
@@ -36,7 +46,14 @@
   DeltaOperator
   (process-delta [_this delta]
     (let [binding (:binding delta)]
-      (if (try (pred-fn binding) (catch Exception _e false))
+      (if (try
+            (pred-fn binding)
+            (catch NullPointerException _e
+              ;; Null pointer is expected when binding values are nil
+              false)
+            (catch ClassCastException _e
+              ;; Type mismatch in comparison - treat as false
+              false))
         [delta]
         []))))
 

@@ -164,14 +164,13 @@
 (defn- read-until-terminator
   "Read bytes until terminator is found."
   [^ByteBuffer bb]
-  (let [start (.position bb)]
-    (loop [bytes []]
-      (if (.hasRemaining bb)
-        (let [b (.get bb)]
-          (if (= b (byte TERMINATOR))
-            (byte-array bytes)
-            (recur (conj bytes b))))
-        (byte-array bytes)))))
+  (loop [bytes []]
+    (if (.hasRemaining bb)
+      (let [b (.get bb)]
+        (if (= b (byte TERMINATOR))
+          (byte-array bytes)
+          (recur (conj bytes b))))
+      (byte-array bytes))))
 
 (defn- decode-value-from-buffer
   "Decode a single value from ByteBuffer."

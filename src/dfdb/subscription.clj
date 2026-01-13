@@ -77,7 +77,7 @@
 
 (defn notify-subscription
   "Notify a subscription of changes using TRUE differential dataflow."
-  [db subscription deltas]
+  [_db subscription deltas]
   (when @(:active? subscription)
     (let [dd-graph (:dd-graph subscription)]
 
@@ -86,9 +86,14 @@
                         {:query (:query-form subscription)})))
 
       ;; TRUE DIFFERENTIAL - NO FALLBACK
-      (let [old-results ((:get-results dd-graph))
+      (let [old-results-raw ((:get-results dd-graph))
+            old-results (if (set? old-results-raw) old-results-raw (set old-results-raw))
+
             _ ((:process-deltas dd-graph) deltas)
-            new-results ((:get-results dd-graph))
+
+            new-results-raw ((:get-results dd-graph))
+            new-results (if (set? new-results-raw) new-results-raw (set new-results-raw))
+
             additions (clojure.set/difference new-results old-results)
             retractions (clojure.set/difference old-results new-results)
             diff {:additions additions :retractions retractions}]
@@ -107,17 +112,26 @@
   [db deltas]
   (doseq [[_id subscription] @subscriptions]
     (when @(:active? subscription)
-      ;; Check if any delta dimensions match watch-dimensions
-      (let [delta-dims (set (mapcat (fn [delta]
-                                      (filter #(and (keyword? %)
-                                                    (namespace %)
-                                                    (.startsWith (namespace %) "time"))
-                                              (keys delta)))
-                                    deltas))
-            watch-dims (set (:watch-dimensions subscription))
-            should-notify? (seq (set/intersection delta-dims watch-dims))]
-        (when should-notify?
-          (notify-subscription db subscription deltas))))))
+      (try
+        ;; Check if any delta dimensions match watch-dimensions
+        (let [delta-dims (set (mapcat (fn [delta]
+                                        (when (map? delta)  ; Ensure delta is a map
+                                          (filter #(and (keyword? %)
+                                                        (namespace %)
+                                                        (.startsWith (namespace %) "time"))
+                                                  (keys delta))))
+                                      deltas))
+              watch-dims (set (:watch-dimensions subscription))
+              should-notify? (seq (set/intersection delta-dims watch-dims))]
+          (when should-notify?
+            (try
+              (notify-subscription db subscription deltas)
+              (catch Exception e
+                (println "Warning: Failed to notify subscription" (:id subscription) "-" (.getMessage e))
+                ;; Continue with other subscriptions
+                nil))))
+        (catch Exception e
+          (println "Warning: Failed to process subscription" (:id subscription) "-" (.getMessage e)))))))
 
 (defrecord SubscriptionNotifier []
   tx/TransactionListener
