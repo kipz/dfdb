@@ -26,21 +26,21 @@
 
 (defn add-element
   "Add an element to the difference (mark as added)."
-  [diff value multiplicity]
+  [^Difference diff value multiplicity]
   (Difference.
    (update (.additions diff) value (fnil + 0) multiplicity)
    (.retractions diff)))
 
 (defn retract-element
   "Retract an element from the difference (mark as removed)."
-  [diff value multiplicity]
+  [^Difference diff value multiplicity]
   (Difference.
    (.additions diff)
    (update (.retractions diff) value (fnil + 0) multiplicity)))
 
 (defn apply-difference
   "Apply a difference to a multiset, returning new multiset."
-  [ms diff]
+  [ms ^Difference diff]
   (let [;; Add all additions
         with-adds (reduce (fn [m [value count]]
                             (ms/add m value count))
@@ -56,7 +56,7 @@
 (defn compact-difference
   "Compact a difference by canceling out additions and retractions.
   If value is both added and retracted, compute net change."
-  [diff]
+  [^Difference diff]
   (let [all-values (set (concat (keys (.additions diff))
                                 (keys (.retractions diff))))
         compacted (reduce (fn [acc value]
@@ -73,7 +73,7 @@
 
 (defn merge-differences
   "Merge two differences."
-  [d1 d2]
+  [^Difference d1 ^Difference d2]
   (compact-difference
    (Difference.
     (merge-with + (.additions d1) (.additions d2))
@@ -82,7 +82,7 @@
 (defn to-subscription-diff
   "Convert internal Difference to subscription diff format.
   Returns {:additions #{...} :retractions #{...}}"
-  [diff]
+  [^Difference diff]
   {:additions (set (mapcat (fn [[value count]]
                              (repeat count value))
                            (.additions diff)))

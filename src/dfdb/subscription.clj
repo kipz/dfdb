@@ -42,7 +42,7 @@
 
         ;; Compile to DD graph
         ;; Pass db for recursive patterns that need access to storage
-        ;; Returns nil for recursive queries (fallback to re-execution)
+        ;; Throws error if query cannot be compiled to DD
         dd-graph (dd/build-pipeline query db)
 
         ;; Initialize DD graph with existing database state

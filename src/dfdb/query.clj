@@ -408,8 +408,8 @@
   (let [query-vec (if (map? query-form)
                     (:query query-form)
                     query-form)
-        find-idx (.indexOf ^clojure.lang.IPersistentVector query-vec :find)
-        where-idx (.indexOf ^clojure.lang.IPersistentVector query-vec :where)
+        find-idx (.indexOf ^java.util.List query-vec :find)
+        where-idx (.indexOf ^java.util.List query-vec :where)
         find-exprs (subvec query-vec (inc find-idx) where-idx)
         where-clauses (subvec query-vec (inc where-idx))
 

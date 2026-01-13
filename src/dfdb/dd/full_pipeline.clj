@@ -90,10 +90,9 @@
 
        ;; Aggregates
        (seq aggregates)
-       (let [;; Get all variables needed for aggregation
-             agg-expr (first aggregates)
-             [agg-fn agg-var] agg-expr
-             all-vars (vec (concat group-vars [agg-var]))
+       (let [;; Get all variables used in ALL aggregate expressions
+             agg-vars (distinct (map second aggregates))
+             all-vars (vec (concat group-vars agg-vars))
 
             ;; Build base WITHOUT final projection (keep full bindings)
             ;; We pass all-vars so the base knows what to keep
@@ -104,7 +103,7 @@
                                  {:query query-form})))
 
             ;; For aggregates, we work directly on result tuples:
-            ;; The base pipeline returns tuples like [customer-id total]
+            ;; The base pipeline returns tuples like [group-key... var1 var2 ...]
             ;; where positions match all-vars order
 
             ;; Extract grouping key from tuple
@@ -114,57 +113,74 @@
                           (vec (take (count group-vars) tuple)))
                         (constantly :all))
 
-            ;; Extract aggregate value from tuple (last element)
-             value-fn (fn [tuple] (last tuple))
+            ;; Create aggregate operators for each aggregate expression
+            ;; Each operates on the same grouping but different variables/aggregations
+             agg-ops (vec
+                      (for [[agg-fn agg-var] aggregates]
+                        (let [;; Find position of this var in all-vars
+                              var-idx (.indexOf ^java.util.List all-vars agg-var)
+                              ;; Extract value for this specific variable
+                              value-fn (fn [tuple] (nth tuple var-idx))
+                              ;; Wrap agg-fn to extract values from tuples
+                              tuple-agg-fn (case agg-fn
+                                             count agg/agg-count
+                                             sum (comp agg/agg-sum (partial map value-fn))
+                                             avg (comp agg/agg-avg (partial map value-fn))
+                                             min (comp agg/agg-min (partial map value-fn))
+                                             max (comp agg/agg-max (partial map value-fn)))]
+                          (agg/make-aggregate-operator group-fn tuple-agg-fn nil))))
 
-            ;; Wrap agg-fn to extract values from tuples
-             tuple-agg-fn (case agg-fn
-                            count agg/agg-count
-                            sum (comp agg/agg-sum (partial map value-fn))
-                            avg (comp agg/agg-avg (partial map value-fn))
-                            min (comp agg/agg-min (partial map value-fn))
-                            max (comp agg/agg-max (partial map value-fn)))
+             collect-agg (simple/->CollectResults {:accumulated (atom {})})
 
-             agg-op (agg/make-aggregate-operator
-                     group-fn
-                     tuple-agg-fn
-                     nil)
-
-             collect-agg (simple/->CollectResults {:accumulated (atom {})})]
+         ;; Helper to extract current aggregate results from operators
+             extract-agg-results (fn []
+                                   (let [first-agg-state @(:aggregates (:state (first agg-ops)))
+                                         latest-timestamp (when (seq first-agg-state) (apply max (keys first-agg-state)))
+                                         first-aggregates (when latest-timestamp (get first-agg-state latest-timestamp))]
+                                     (when first-aggregates
+                                       (set
+                                        (for [group-key (keys first-aggregates)]
+                                          (let [agg-values (vec
+                                                            (for [agg-op agg-ops]
+                                                              (let [state @(:aggregates (:state agg-op))
+                                                                    aggs (get state latest-timestamp)]
+                                                                (get aggs group-key))))]
+                                            (if (= :all group-key)
+                                              agg-values
+                                              (vec (concat group-key agg-values)))))))))]
 
          {:process-deltas
           (fn [tx-deltas]
-           ;; Process through base
-            ((:process-deltas base) tx-deltas)
+           ;; Get current aggregate results BEFORE processing
+            (let [old-results (or (extract-agg-results) #{})]
 
-           ;; Get intermediate results (tuples)
-            (let [intermediate ((:get-results base))
-                  ;; Convert to multiset
-                  ms (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))]
-              ;; Feed to aggregate operator
-              (op/input agg-op ms (System/currentTimeMillis))
+             ;; Process through base
+              ((:process-deltas base) tx-deltas)
 
-              ;; Extract aggregated results from operator state
-              ;; State is {timestamp {group-key agg-value}}
-              (let [agg-state @(:aggregates (:state agg-op))
-                    latest-timestamp (when (seq agg-state) (apply max (keys agg-state)))
-                    aggregates (when latest-timestamp (get agg-state latest-timestamp))
-                    ;; Convert {group-key sum} to result tuples
-                    ;; If no grouping (group-key = :all), result is just [agg-val]
-                    ;; If grouping, result is [group-key... agg-val]
-                    agg-results (when aggregates
-                                  (map (fn [[group-key agg-val]]
-                                         (if (= :all group-key)
-                                           ;; No grouping - just aggregate value
-                                           [agg-val]
-                                           ;; With grouping - concat group key and agg value
-                                           (vec (concat group-key [agg-val]))))
-                                       aggregates))]
-                ;; Reset and feed to collect
-                (reset! (:accumulated (:state collect-agg)) {})
-                (doseq [result agg-results]
-                  (let [d (delta/make-delta result 1)]
-                    (simple/process-delta collect-agg d))))))
+             ;; Get intermediate results (tuples)
+              (let [intermediate ((:get-results base))
+                    ;; Convert to multiset
+                    ms (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))]
+
+               ;; Feed to ALL aggregate operators
+                (doseq [agg-op agg-ops]
+                  (op/input agg-op ms (System/currentTimeMillis)))
+
+               ;; Get new aggregate results AFTER processing
+                (let [new-results (or (extract-agg-results) #{})
+
+                      ;; Compute differential
+                      additions (clojure.set/difference new-results old-results)
+                      retractions (clojure.set/difference old-results new-results)]
+
+                 ;; Feed differential to collect operator
+                  (doseq [result retractions]
+                    (let [d (delta/make-delta result -1)]
+                      (simple/process-delta collect-agg d)))
+
+                  (doseq [result additions]
+                    (let [d (delta/make-delta result 1)]
+                      (simple/process-delta collect-agg d)))))))
 
           :get-results
           (fn [] (simple/get-results collect-agg))})

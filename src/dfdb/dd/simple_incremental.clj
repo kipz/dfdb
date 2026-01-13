@@ -103,33 +103,44 @@
 (defn make-simple-pipeline
   "Create simple operator pipeline for single-pattern query.
   Returns {:process-deltas-fn get-results-fn}."
-  [pattern find-vars]
+  ([pattern find-vars] (make-simple-pipeline pattern find-vars []))
+  ([pattern find-vars predicate-filters]
 
-  (let [;; Create operators
-        pattern-op (->PatternOperator pattern (atom {}))
-        project-op (->ProjectOperator find-vars (atom {}))
-        collect-op (->CollectResults {:accumulated (atom {})})
+   (let [;; Create operators
+         pattern-op (->PatternOperator pattern (atom {}))
+         project-op (->ProjectOperator find-vars (atom {}))
+         collect-op (->CollectResults {:accumulated (atom {})})
 
-        ;; Chain: pattern -> project -> collect
-        process-chain (fn [delta]
-                        (->> [delta]
-                             (mapcat #(process-delta pattern-op %))
-                             (mapcat #(process-delta project-op %))
-                             (mapcat #(process-delta collect-op %))))]
+         ;; Helper to apply predicate filters to deltas
+         apply-filters (fn [deltas]
+                         (if (empty? predicate-filters)
+                           deltas
+                           (reduce (fn [ds filter-op]
+                                     (mapcat #(process-delta filter-op %) ds))
+                                   deltas
+                                   predicate-filters)))
 
-    {:process-deltas
-     (fn [tx-deltas]
-       ;; Convert transaction deltas to binding deltas
-       (let [binding-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)]
-         ;; Process through pipeline
-         (doseq [d binding-deltas]
-           (process-chain d))))
+         ;; Chain: pattern -> filters -> project -> collect
+         process-chain (fn [delta]
+                         (->> [delta]
+                              (mapcat #(process-delta pattern-op %))
+                              (apply-filters)
+                              (mapcat #(process-delta project-op %))
+                              (mapcat #(process-delta collect-op %))))]
 
-     :get-results
-     (fn []
-       (get-results collect-op))
+     {:process-deltas
+      (fn [tx-deltas]
+        ;; Convert transaction deltas to binding deltas
+        (let [binding-deltas (delta/transaction-deltas-to-binding-deltas tx-deltas pattern)]
+          ;; Process through pipeline
+          (doseq [d binding-deltas]
+            (process-chain d))))
 
-     :operators
-     {:pattern pattern-op
-      :project project-op
-      :collect collect-op}}))
+      :get-results
+      (fn []
+        (get-results collect-op))
+
+      :operators
+      {:pattern pattern-op
+       :project project-op
+       :collect collect-op}})))

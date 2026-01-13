@@ -66,7 +66,7 @@
   [db m tempid-map tempid-counter tx-time]
   (let [[eid tempid-counter'] (if (:db/id m)
                                 [(:db/id m) tempid-counter]
-                                [(- tempid-counter) (inc tempid-counter)])  ; generate unique negative tempid
+                                [(- tempid-counter) (unchecked-inc tempid-counter)])  ; generate unique negative tempid
         [resolved-eid tempid-map'] (resolve-entity-id db eid tempid-map tx-time)
         attrs (dissoc m :db/id)]
     [(for [[a v] attrs]
@@ -81,7 +81,7 @@
   (loop [data tx-data
          tuples []
          tmap tempid-map
-         tempid-counter 1]  ; start at 1, so first auto-tempid is -1
+         tempid-counter (long 1)]  ; start at 1, so first auto-tempid is -1
     (if (empty? data)
       [tuples tmap]
       (let [item (first data)]
@@ -92,7 +92,7 @@
             (recur (rest data)
                    (concat tuples expanded-tuples)
                    tmap'
-                   counter'))
+                   (long counter')))
 
           ;; List/vector notation [op e a v] or [op e a k v] for :db/assoc
           (or (vector? item) (list? item))
@@ -236,7 +236,7 @@
         :index-value new-value
         :operation operation
         :tx {:tx/id tx-id
-             :tx/time (java.util.Date. tx-time)}}
+             :tx/time (java.util.Date. ^long tx-time)}}
        time-dimensions))))
 
 (defn apply-delta

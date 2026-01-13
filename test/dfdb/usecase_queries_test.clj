@@ -256,17 +256,20 @@
   (testing "Graph traversal - finding paths"
     (let [db (create-db)]
 
-      ;; Create graph: 1->2->3->4
-      ;;               1->5->4
-      (transact! db [{:node/id 1 :node/edges [2 5]}
-                     {:node/id 2 :node/edges [3]}
-                     {:node/id 3 :node/edges [4]}
-                     {:node/id 5 :node/edges [4]}
-                     {:node/id 4 :node/edges []}])
+      ;; Create graph: 1->2->3->4 (chain)
+      (transact! db [{:node/id 1 :node/next 2}
+                     {:node/id 2 :node/next 3}
+                     {:node/id 3 :node/next 4}
+                     {:node/id 4}])
 
-      ;; Find if 4 is reachable from 1 (yes, via transitive closure)
-      ;; This would require custom recursive logic
-      (is true))))  ; Placeholder
+      ;; Find all nodes reachable from node 1 using transitive closure
+      (let [reachable (query db '[:find ?target
+                                  :where
+                                  [?start :node/id 1]
+                                  [?start :node/next+ ?target]])]
+        ;; Node 1 can reach 2, 3, 4 via next
+        (is (= 3 (count reachable)))
+        (is (= #{[2] [3] [4]} (set reachable)))))))
 
 (deftest test-graph-degree-centrality
   (testing "Graph analytics - node degree"

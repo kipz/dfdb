@@ -141,10 +141,10 @@
     (.getBytes s "UTF-8")))
 
 (defn- read-byte
-  "Read single byte from ByteBuffer."
-  [^ByteBuffer bb]
+  "Read single byte from ByteBuffer as int."
+  ^long [^ByteBuffer bb]
   (when (.hasRemaining bb)
-    (.get bb)))
+    (bit-and (.get bb) 0xFF)))
 
 (defn- read-long
   "Read long from ByteBuffer."
@@ -176,7 +176,7 @@
   "Decode a single value from ByteBuffer."
   [^ByteBuffer bb]
   (when (.hasRemaining bb)
-    (let [type-tag (read-byte bb)]
+    (let [type-tag (int (read-byte bb))]
       (case type-tag
         0x00  ; TYPE-NIL
         nil
@@ -194,8 +194,8 @@
         (String. ^bytes (read-until-terminator bb) "UTF-8")
 
         0x03  ; TYPE-KEYWORD
-        (let [ns-bytes (read-until-terminator bb)
-              name-bytes (read-until-terminator bb)
+        (let [^bytes ns-bytes (read-until-terminator bb)
+              ^bytes name-bytes (read-until-terminator bb)
               ns-str (when (pos? (alength ns-bytes))
                        (String. ns-bytes "UTF-8"))
               name-str (String. name-bytes "UTF-8")]
@@ -204,7 +204,7 @@
             (keyword name-str)))
 
         0x04  ; TYPE-INSTANT
-        (Date. (read-long bb))
+        (Date. ^long (read-long bb))
 
         0x05  ; TYPE-VECTOR
         (loop [elements []]

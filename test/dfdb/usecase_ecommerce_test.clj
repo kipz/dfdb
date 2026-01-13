@@ -290,8 +290,21 @@
         (is (= 3 (count orders))))
 
       ;; Find rapid orders (within 5 minutes of each other)
-      ;; Would require temporal joins - complex query
-      (is true))))  ; Placeholder
+      ;; This tests that we can extract temporal dimensions and identify patterns
+      (let [orders (query db '[:find ?order-id ?order-time
+                               :where
+                               [?order :order/customer "user@example.com"]
+                               [?order :order/id ?order-id]
+                               [?order :order/id _ :at/ordered ?order-time]])
+            times (map second orders)
+            sorted-times (sort times)]
+        ;; Verify all orders were placed within 5 minutes
+        (is (= 3 (count times)))
+        (let [first-time (.getTime ^java.util.Date (first sorted-times))
+              last-time (.getTime ^java.util.Date (last sorted-times))
+              delta-minutes (/ (- last-time first-time) 1000.0 60.0)]
+          ;; All orders within 5 minutes indicates potential fraud
+          (is (< delta-minutes 5.0)))))))
 
 (deftest test-ecommerce-return-and-refund
   (testing "Order returns with retroactive updates"

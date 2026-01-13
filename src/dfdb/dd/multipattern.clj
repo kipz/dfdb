@@ -64,7 +64,7 @@
      (cond
       ;; Single pattern
        (= 1 (count patterns))
-       (simple/make-simple-pipeline (first patterns) find-vars)
+       (simple/make-simple-pipeline (first patterns) find-vars predicate-filters)
 
       ;; Exactly two patterns - simple join
        (= 2 (count patterns))

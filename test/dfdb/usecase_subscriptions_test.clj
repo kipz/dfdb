@@ -544,17 +544,3 @@
         (is (>= (count @updates) 3))  ; Initial + v1 + correction
 
         (unsubscribe sub)))))
-
-;; =============================================================================
-;; Helper Functions (Phase 3)
-;; =============================================================================
-
-(defn subscribe
-  "Subscribe to query - Phase 3 implementation."
-  [db config]
-  (throw (ex-info "Subscribe not yet implemented - Phase 3" {:config config})))
-
-(defn unsubscribe
-  "Unsubscribe - Phase 3 implementation."
-  [sub]
-  (throw (ex-info "Unsubscribe not yet implemented - Phase 3" {:sub sub})))

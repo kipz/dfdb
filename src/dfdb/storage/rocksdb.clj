@@ -22,8 +22,8 @@
                   write-buffer-size (* 64 1024 1024)  ; 64MB
                   max-open-files -1  ; unlimited
                   block-cache-size (* 128 1024 1024)}}]  ; 128MB
-  (let [opts (Options.)]
-    (.setCreateIfMissing opts create-if-missing)
+  (let [^org.rocksdb.Options opts (Options.)]
+    (.setCreateIfMissing opts (boolean create-if-missing))
 
     ;; Compression
     (.setCompressionType opts
@@ -35,8 +35,8 @@
                            CompressionType/SNAPPY_COMPRESSION))
 
     ;; Memory and performance
-    (.setWriteBufferSize opts write-buffer-size)
-    (.setMaxOpenFiles opts max-open-files)
+    (.setWriteBufferSize opts (long write-buffer-size))
+    (.setMaxOpenFiles opts (int max-open-files))
 
     ;; Block cache for reads
     (when block-cache-size
