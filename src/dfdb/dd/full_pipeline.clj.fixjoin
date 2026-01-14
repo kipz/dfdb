@@ -149,9 +149,6 @@
              extract-agg-results (fn []
                                    (let [ts @current-timestamp
                                          first-agg-state @(:aggregates (:state (first agg-ops)))
-                                         all-timestamps (keys first-agg-state)
-                                         _ (when (> (count all-timestamps) 1)
-                                             (println "WARNING: Multiple timestamps in aggregate state:" all-timestamps))
                                          first-aggregates (get first-agg-state ts)]
                                      (when first-aggregates
                                        (set
@@ -193,28 +190,11 @@
 
                ;; Get new aggregate results AFTER processing
                 (let [new-results (or (extract-agg-results) #{})
-
                       ;; Compute differential
                       additions (clojure.set/difference new-results old-results)
-                      retractions (clojure.set/difference old-results new-results)
-
-                      ;; Debug if there are changes but no retractions (unexpected for aggregates)
-                      _ (when (and (seq additions) (empty? retractions) (seq old-results))
-                          (println "WARNING: Additions without retractions!")
-                          (println "  old-results:" old-results)
-                          (println "  new-results:" new-results)
-                          (println "  additions:" additions))]
+                      retractions (clojure.set/difference old-results new-results)]
 
                  ;; Feed differential to collect operator
-                  ;; Debug: check if retractions exist in collect-agg
-                  (when (seq retractions)
-                    (let [collect-state @(:accumulated (:state collect-agg))
-                          missing-in-collect (filter (fn [r] (not (pos? (get collect-state r 0)))) retractions)]
-                      (when (seq missing-in-collect)
-                        (println "WARNING: Retracting values not in collect-agg:" missing-in-collect)
-                        (println "  Current collect-agg positive entries:"
-                                 (filter (fn [[k v]] (pos? v)) collect-state)))))
-
                   (doseq [result retractions]
                     (let [d (delta/make-delta result -1)]
                       (core/process-delta collect-agg d)))
@@ -307,37 +287,6 @@
 ;; DD Pipeline State Initialization
 ;; =============================================================================
 
-(defn- compute-join-result
-  "Compute the actual join result of two sets of bindings.
-  Uses hash join logic matching the query engine's join-bindings function."
-  [left-bindings right-bindings]
-  (if (or (empty? left-bindings) (empty? right-bindings))
-    #{}
-    (let [common-vars (clojure.set/intersection
-                       (set (keys (first left-bindings)))
-                       (set (keys (first right-bindings))))]
-      (if (empty? common-vars)
-        ;; No common variables - Cartesian product
-        (set (for [b1 left-bindings b2 right-bindings]
-               (merge b1 b2)))
-        ;; Hash join: build hash table from smaller side
-        (let [[build-side probe-side] (if (<= (count left-bindings) (count right-bindings))
-                                        [left-bindings right-bindings]
-                                        [right-bindings left-bindings])
-              ;; Build phase: create hash table join-key -> [bindings]
-              hash-table (reduce (fn [ht binding]
-                                   (let [join-key (select-keys binding common-vars)
-                                         existing (get ht join-key [])]
-                                     (assoc ht join-key (conj existing binding))))
-                                 {}
-                                 build-side)]
-          ;; Probe phase: look up each probe-side binding and merge matches
-          (set (mapcat (fn [probe-binding]
-                         (let [join-key (select-keys probe-binding common-vars)]
-                           (when-let [matching-bindings (get hash-table join-key)]
-                             (map #(merge % probe-binding) matching-bindings))))
-                       probe-side)))))))
-
 (defn initialize-pipeline-state
   "Initialize DD pipeline state with existing database contents.
   Uses naive query execution to compute initial results, then directly
@@ -420,29 +369,41 @@
 
                   ;; Initialize join operator states progressively
                   ;; First join: pattern1 ⋈ pattern2
-                  (when-let [join0 (first join-ops)]
-                    (reset! (:left-state join0)
+                  (when-let [join1 (first join-ops)]
+                    (reset! (:left-state join1)
                             (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
-                    (reset! (:right-state join0)
+                    (reset! (:right-state join1)
                             (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
 
-                  ;; For subsequent joins, left side is previous join result, right is next pattern
-                  ;; We approximate by using pattern results (full join computation would be expensive)
-                  (loop [i 1
-                         prev-join-result (compute-join-result (nth pattern-bindings 0)
-                                                               (nth pattern-bindings 1))]
-                    (when (< i (count join-ops))
-                      (when-let [join-op (nth join-ops i)]
-                        ;; Left state: previous join's result
+                  ;; For subsequent joins, compute actual join results
+                  ;; Start with first join result and progressively join with remaining patterns
+                  (loop [join-idx 1
+                         prev-result (first pattern-bindings)]
+                    (when (< join-idx (count join-ops))
+                      (let [join-op (nth join-ops join-idx)
+                            pattern-idx (inc join-idx)
+                            right-bindings (nth pattern-bindings pattern-idx)
+
+                            ;; Compute actual join between prev-result and right-bindings
+                            ;; This is expensive but necessary for correctness
+                            join-vars-list (vec (filter (set (mapcat keys prev-result))
+                                                        (mapcat keys right-bindings)))
+                            joined-result (set
+                                           (for [left prev-result
+                                                 right right-bindings
+                                                 :let [left-jk (select-keys left join-vars-list)
+                                                       right-jk (select-keys right join-vars-list)]
+                                                 :when (= left-jk right-jk)]
+                                             (merge left right)))]
+
+                        ;; Initialize join state with actual results
                         (reset! (:left-state join-op)
-                                (into {} (map (fn [b] [b 1]) prev-join-result)))
-                        ;; Right state: next pattern
+                                (into {} (map (fn [b] [b 1]) prev-result)))
                         (reset! (:right-state join-op)
-                                (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))
-                        ;; Compute this join's result for next iteration
-                        (let [next-join-result (compute-join-result prev-join-result
-                                                                    (nth pattern-bindings (inc i)))]
-                          (recur (inc i) next-join-result))))))))
+                                (into {} (map (fn [b] [b 1]) right-bindings)))
+
+                        ;; Continue with this join's result
+                        (recur (inc join-idx) joined-result)))))))
 
             :else nil)
           (catch Exception e
@@ -484,21 +445,12 @@
                                     (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
                             (reset! (:right-state join1)
                                     (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
-                          (loop [i 1
-                                 prev-join-result (compute-join-result (nth pattern-bindings 0)
-                                                                       (nth pattern-bindings 1))]
-                            (when (< i (count join-ops))
-                              (when-let [join-op (nth join-ops i)]
-                                ;; Left state: previous join's result
-                                (reset! (:left-state join-op)
-                                        (into {} (map (fn [b] [b 1]) prev-join-result)))
-                                ;; Right state: next pattern
-                                (reset! (:right-state join-op)
-                                        (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))
-                                ;; Compute this join's result for next iteration
-                                (let [next-join-result (compute-join-result prev-join-result
-                                                                            (nth pattern-bindings (inc i)))]
-                                  (recur (inc i) next-join-result)))))))))
+                          (doseq [i (range 1 (count join-ops))]
+                            (when-let [join-op (nth join-ops i)]
+                              (reset! (:left-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings i))))
+                              (reset! (:right-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))))))))
 
                   ;; Query the patterns without aggregation to get raw tuples
                   ;; CRITICAL: Query with ALL pattern vars to prevent deduplication!

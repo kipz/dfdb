@@ -63,7 +63,7 @@
 (defn make-predicate-filters
   "Create predicate filter operators from predicate clauses."
   [predicates]
-  (map #(core/->PredicateFilter (predicate-to-fn %)) predicates))
+  (map #(simple/->PredicateFilter (predicate-to-fn %)) predicates))
 
 ;; =============================================================================
 ;; Complete Builder
@@ -92,14 +92,7 @@
        (seq aggregates)
        (let [;; Get all variables used in ALL aggregate expressions
              agg-vars (distinct (map second aggregates))
-             ;; Get ALL variables from patterns (for preventing deduplication)
-             all-pattern-vars (distinct (mapcat (fn [pattern]
-                                                  (filter #(and (symbol? %) (.startsWith (name %) "?")) pattern))
-                                                pure-patterns))
-             ;; Variables for final results (group + agg)
-             result-vars (vec (concat group-vars agg-vars))
-             ;; For pipeline, use result-vars
-             all-vars result-vars
+             all-vars (vec (concat group-vars agg-vars))
 
             ;; Create predicate filters to apply during incremental updates
              pred-filters (make-predicate-filters predicates)
@@ -140,7 +133,7 @@
                                              max (comp agg/agg-max (partial map value-fn)))]
                           (agg/make-aggregate-operator group-fn tuple-agg-fn nil))))
 
-             collect-agg (core/->CollectResults {:accumulated (atom {})})
+             collect-agg (simple/->CollectResults {:accumulated (atom {})})
 
             ;; Use a fixed timestamp for this aggregate pipeline (we don't need temporal versions)
              current-timestamp (atom 0)
@@ -217,19 +210,17 @@
 
                   (doseq [result retractions]
                     (let [d (delta/make-delta result -1)]
-                      (core/process-delta collect-agg d)))
+                      (simple/process-delta collect-agg d)))
 
                   (doseq [result additions]
                     (let [d (delta/make-delta result 1)]
-                      (core/process-delta collect-agg d)))))))
+                      (simple/process-delta collect-agg d)))))))
 
           :get-results
-          (fn [] (core/get-results collect-agg))
+          (fn [] (simple/get-results collect-agg))
 
           :base base
           :all-vars all-vars
-          :result-vars result-vars
-          :all-pattern-vars all-pattern-vars
           :agg-ops agg-ops
           :group-vars group-vars
           :extract-agg-results extract-agg-results
@@ -271,7 +262,7 @@
         ;; Build pipeline for NOT pattern to track what matches
         not-pipeline (mp/make-multi-pattern-pipeline [not-pattern] [])
 
-        filtered-collect (core/->CollectResults {:accumulated (atom {})})]
+        filtered-collect (simple/->CollectResults {:accumulated (atom {})})]
 
     (if not-pipeline
       {:process-deltas
@@ -292,10 +283,10 @@
            ;; Emit results that DON'T appear in NOT results
            (doseq [result base-results]
              (when-not (contains? not-results result)
-               (core/process-delta filtered-collect (delta/make-delta result 1))))))
+               (simple/process-delta filtered-collect (delta/make-delta result 1))))))
 
        :get-results
-       (fn [] (core/get-results filtered-collect))}
+       (fn [] (simple/get-results filtered-collect))}
 
       ;; Can't compile NOT pattern
       (throw (ex-info "Could not compile NOT pattern to DD"
@@ -306,37 +297,6 @@
 ;; =============================================================================
 ;; DD Pipeline State Initialization
 ;; =============================================================================
-
-(defn- compute-join-result
-  "Compute the actual join result of two sets of bindings.
-  Uses hash join logic matching the query engine's join-bindings function."
-  [left-bindings right-bindings]
-  (if (or (empty? left-bindings) (empty? right-bindings))
-    #{}
-    (let [common-vars (clojure.set/intersection
-                       (set (keys (first left-bindings)))
-                       (set (keys (first right-bindings))))]
-      (if (empty? common-vars)
-        ;; No common variables - Cartesian product
-        (set (for [b1 left-bindings b2 right-bindings]
-               (merge b1 b2)))
-        ;; Hash join: build hash table from smaller side
-        (let [[build-side probe-side] (if (<= (count left-bindings) (count right-bindings))
-                                        [left-bindings right-bindings]
-                                        [right-bindings left-bindings])
-              ;; Build phase: create hash table join-key -> [bindings]
-              hash-table (reduce (fn [ht binding]
-                                   (let [join-key (select-keys binding common-vars)
-                                         existing (get ht join-key [])]
-                                     (assoc ht join-key (conj existing binding))))
-                                 {}
-                                 build-side)]
-          ;; Probe phase: look up each probe-side binding and merge matches
-          (set (mapcat (fn [probe-binding]
-                         (let [join-key (select-keys probe-binding common-vars)]
-                           (when-let [matching-bindings (get hash-table join-key)]
-                             (map #(merge % probe-binding) matching-bindings))))
-                       probe-side)))))))
 
 (defn initialize-pipeline-state
   "Initialize DD pipeline state with existing database contents.
@@ -420,29 +380,22 @@
 
                   ;; Initialize join operator states progressively
                   ;; First join: pattern1 ⋈ pattern2
-                  (when-let [join0 (first join-ops)]
-                    (reset! (:left-state join0)
+                  (when-let [join1 (first join-ops)]
+                    (reset! (:left-state join1)
                             (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
-                    (reset! (:right-state join0)
+                    (reset! (:right-state join1)
                             (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
 
                   ;; For subsequent joins, left side is previous join result, right is next pattern
                   ;; We approximate by using pattern results (full join computation would be expensive)
-                  (loop [i 1
-                         prev-join-result (compute-join-result (nth pattern-bindings 0)
-                                                               (nth pattern-bindings 1))]
-                    (when (< i (count join-ops))
-                      (when-let [join-op (nth join-ops i)]
-                        ;; Left state: previous join's result
-                        (reset! (:left-state join-op)
-                                (into {} (map (fn [b] [b 1]) prev-join-result)))
-                        ;; Right state: next pattern
-                        (reset! (:right-state join-op)
-                                (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))
-                        ;; Compute this join's result for next iteration
-                        (let [next-join-result (compute-join-result prev-join-result
-                                                                    (nth pattern-bindings (inc i)))]
-                          (recur (inc i) next-join-result))))))))
+                  (doseq [i (range 1 (count join-ops))]
+                    (when-let [join-op (nth join-ops i)]
+                      ;; Left state: use pattern results (approximation)
+                      (reset! (:left-state join-op)
+                              (into {} (map (fn [b] [b 1]) (nth pattern-bindings i))))
+                      ;; Right state: next pattern
+                      (reset! (:right-state join-op)
+                              (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i))))))))))
 
             :else nil)
           (catch Exception e
@@ -484,21 +437,12 @@
                                     (into {} (map (fn [b] [b 1]) (nth pattern-bindings 0))))
                             (reset! (:right-state join1)
                                     (into {} (map (fn [b] [b 1]) (nth pattern-bindings 1)))))
-                          (loop [i 1
-                                 prev-join-result (compute-join-result (nth pattern-bindings 0)
-                                                                       (nth pattern-bindings 1))]
-                            (when (< i (count join-ops))
-                              (when-let [join-op (nth join-ops i)]
-                                ;; Left state: previous join's result
-                                (reset! (:left-state join-op)
-                                        (into {} (map (fn [b] [b 1]) prev-join-result)))
-                                ;; Right state: next pattern
-                                (reset! (:right-state join-op)
-                                        (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))
-                                ;; Compute this join's result for next iteration
-                                (let [next-join-result (compute-join-result prev-join-result
-                                                                            (nth pattern-bindings (inc i)))]
-                                  (recur (inc i) next-join-result)))))))))
+                          (doseq [i (range 1 (count join-ops))]
+                            (when-let [join-op (nth join-ops i)]
+                              (reset! (:left-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings i))))
+                              (reset! (:right-state join-op)
+                                      (into {} (map (fn [b] [b 1]) (nth pattern-bindings (inc i)))))))))))
 
                   ;; Query the patterns without aggregation to get raw tuples
                   ;; CRITICAL: Query with ALL pattern vars to prevent deduplication!

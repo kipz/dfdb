@@ -50,7 +50,16 @@
             (dd/initialize-pipeline-state dd-graph db query))
 
         ;; Initial query execution
-        initial-results (query/query db query)
+        ;; For aggregate DD pipelines, get results from the pipeline (already computed)
+        ;; For other queries, run naive query
+        parsed (query/parse-query query)
+        has-aggregates? (seq (:aggregates parsed))
+        initial-results (if (and dd-graph has-aggregates?)
+                          ;; Get from DD pipeline (aggregate operators already computed)
+                          (let [results ((:get-results dd-graph))]
+                            (if (set? results) results (set results)))
+                          ;; Naive query for non-aggregates
+                          (query/query db query))
 
         ;; Create channel if needed
         channel (when (= delivery :core-async)
