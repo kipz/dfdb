@@ -216,8 +216,11 @@
                                  (filter (fn [[k v]] (pos? v)) collect-state)))))
 
                   (doseq [result retractions]
-                    (let [d (delta/make-delta result -1)]
-                      (core/process-delta collect-agg d)))
+                    ;; Defensive check: only retract if value exists in collect-agg
+                    (let [current-mult (get @(:accumulated (:state collect-agg)) result 0)]
+                      (when (pos? current-mult)
+                        (let [d (delta/make-delta result -1)]
+                          (core/process-delta collect-agg d)))))
 
                   (doseq [result additions]
                     (let [d (delta/make-delta result 1)]

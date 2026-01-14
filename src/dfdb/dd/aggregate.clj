@@ -21,8 +21,8 @@
                                   [group-key (agg-fn values)])
                                 grouped))]
 
-      ;; Store in state
-      (swap! (:aggregates state) assoc timestamp aggregates)
+      ;; Store in state - use reset! to keep only latest timestamp (O(1) space)
+      (reset! (:aggregates state) {timestamp aggregates})
 
       ;; Forward to downstream as collection
       (when downstream
@@ -95,8 +95,8 @@
                                       (repeat count value))
                                     (seq coll)))]
 
-      ;; Store groups
-      (swap! (:groups state) assoc timestamp grouped)
+      ;; Store groups - use reset! to keep only latest timestamp (O(1) space)
+      (reset! (:groups state) {timestamp grouped})
 
       ;; Forward groups to downstream
       ;; Each group becomes a separate collection

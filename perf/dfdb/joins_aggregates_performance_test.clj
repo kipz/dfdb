@@ -198,7 +198,13 @@
     (println "Speedup:" (format "%.1fx" (double speedup)))
     (println "Results match:" match?)
     (when-not match?
-      (println "  Sub count:" (count sub-final) "Naive count:" (count naive-final)))
+      (println "  Sub count:" (count sub-final) "Naive count:" (count naive-final))
+      (when (< (count sub-final) 10)
+        (println "  Sub final:" (vec (sort sub-final)))
+        (println "  Naive final:" (vec (sort naive-final)))))
+
+    ;; Clean up subscription
+    (sub/unsubscribe subscription)
 
     {:scenario scenario-name
      :subscription-ms (nanos->millis sub-mean)

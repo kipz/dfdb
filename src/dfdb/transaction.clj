@@ -196,6 +196,9 @@
                                     ;; treat as multi-valued refs (e.g., graph edges)
                                     ;; Otherwise replace (cardinality-one semantic)
                                     (if (and (integer? v-resolved) (integer? current-value)
+                                             ;; Only apply to non-namespaced attributes (refs like :friend)
+                                             ;; Namespaced attributes (:user/age) use cardinality-one
+                                             (nil? (namespace a))
                                              ;; Check if values are in entity ID range (< 1000)
                                              ;; This heuristic distinguishes refs from numeric values like balances
                                              (pos? v-resolved) (pos? current-value)
