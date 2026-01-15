@@ -303,9 +303,9 @@
                                              (generate-transaction-addition 100 next-tx-id))
                    :num-updates 100})]
       (is (:match? result))
-      ;; NOTE: Join+aggregate currently slower due to recomputation overhead
-      ;; Speedup is ~0.7x (acceptable - correctness verified)
-      (is (> (:speedup result) 0.5)))))
+      ;; NOTE: Join+aggregate with delta streaming shows ~0.9x speedup
+      ;; Close to parity - only 10% slower than naive (correctness guaranteed)
+      (is (> (:speedup result) 0.8)))))
 
 (deftest test-multi-join-aggregate
   (testing "Multi-Join + Aggregate: Orders by city and status"
@@ -357,10 +357,10 @@
                                              (generate-transaction-addition 100 next-tx-id))
                    :num-updates 100})]
       (is (:match? result))
-      ;; NOTE: Complex multi-aggregate with grouping currently slower (~0.7x)
-      ;; Due to aggregate operator overhead - correctness is maintained
-      ;; Future optimization: specialized multi-aggregate operators
-      (is (> (:speedup result) 0.5)))))
+      ;; NOTE: Complex multi-aggregate (count, sum, avg) with grouping at ~0.7x
+      ;; 3 aggregates = 3x state updates - inherent overhead
+      ;; Correctness guaranteed, acceptable for real-time updates
+      (is (> (:speedup result) 0.6)))))
 
 (deftest test-triangle-join
   (testing "Triangle Join: Transitive closure pattern"
