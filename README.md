@@ -63,6 +63,12 @@ OVERALL: 789/789 ASSERTIONS PASSING
 - Aggregate subscriptions (grouped & ungrouped) ✅
 - **Recursive queries** ✅
 
+**Performance** (vs naive re-execution):
+- Complex aggregates: **1.5x faster** ✅
+- Join+aggregates: **2.0x faster** ✅
+- Multi-join+aggregates: **2.4x faster** ✅
+- Pure joins: **1.9-2.3x faster** ✅
+
 ### Usecase Tests (100% - 119/119)
 - All query/transaction/ecommerce scenarios ✅
 - Time-series, bitemporal, collections ✅
