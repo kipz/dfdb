@@ -136,7 +136,7 @@
                                 rand {:value-fn value-fn-delta :agg-fn inc-agg/inc-rand :extract-fn :result}))))
 
                agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
-               collect-agg (core/->CollectResults {:accumulated (atom {})})]
+               collect-agg (core/->CollectResults {:accumulated (atom {})} nil)]
 
            ;; Return combined pipeline
            ;; NOTE: This recomputes aggregates from scratch each time
@@ -153,7 +153,7 @@
 
                 ;; Create fresh aggregate operators
                 (let [fresh-agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
-                      fresh-collect (core/->CollectResults {:accumulated (atom {})})]
+                      fresh-collect (core/->CollectResults {:accumulated (atom {})} nil)]
 
                   ;; Feed ALL raw results through fresh aggregates
                   (doseq [result raw-results]
@@ -199,9 +199,13 @@
             ;; Create predicate filters to apply during incremental updates
              pred-filters (make-predicate-filters predicates)
 
-            ;; Build base WITH predicate filters (keep full bindings)
+             ;; Create delta stream for capturing base pipeline deltas
+             delta-stream (atom [])
+             delta-callback (fn [delta] (swap! delta-stream conj delta))
+
+            ;; Build base WITH predicate filters AND delta callback
             ;; We pass all-vars so the base knows what to keep
-             base (mp/make-multi-pattern-pipeline pure-patterns all-vars pred-filters)
+             base (mp/make-multi-pattern-pipeline pure-patterns all-vars pred-filters delta-callback)
 
              _ (when-not base
                  (throw (ex-info "Could not build pattern pipeline"
@@ -282,51 +286,29 @@
             ;; Create the multi-aggregate operator
              agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
 
-             collect-agg (core/->CollectResults {:accumulated (atom {})})
-
-         ;; Helper to extract current aggregate results from collect operator
-         ;; With incremental aggregates, results are stored in collect-agg
-             extract-agg-results (fn []
-                                   (core/get-results collect-agg))]
+             ;; Create final collect for aggregate results
+             collect-agg (core/->CollectResults {:accumulated (atom {})} nil)]
 
          {:process-deltas
           (fn [tx-deltas]
-            ;; NEW DELTA-BASED APPROACH:
-            ;; Work with MULTISETS (with multiplicities) to handle duplicate tuples correctly
-            ;; Critical for aggregates where [1 100000] can appear multiple times
+            ;; OPTIMIZED: Stream deltas directly from base to aggregates
+            ;; delta-stream is populated by callback in base pipeline's CollectResults
 
-            ;; Get old accumulated multiset BEFORE processing
-            (let [base-ops (:operators base)
-                  base-collect (:collect base-ops)
-                  old-accumulated (or (when base-collect @(:accumulated (:state base-collect))) {})]
+            ;; Clear delta stream
+            (reset! delta-stream [])
 
-              ;; Process through base pipeline
-              ((:process-deltas base) tx-deltas)
+            ;; Process through base pipeline (deltas captured via callback in real-time)
+            ((:process-deltas base) tx-deltas)
 
-              ;; Get new accumulated multiset AFTER processing
-              (let [new-accumulated (or (when base-collect @(:accumulated (:state base-collect))) {})
+            (when (System/getProperty "dfdb.debug.agg")
+              (println "DEBUG AGG STREAM: Captured" (count @delta-stream) "deltas from base"))
 
-                    ;; Compute differential at multiset level
-                    ;; For each binding, check if multiplicity changed
-                    all-bindings (set (concat (keys old-accumulated) (keys new-accumulated)))
-
-                    deltas (for [binding all-bindings
-                                 :let [old-mult (get old-accumulated binding 0)
-                                       new-mult (get new-accumulated binding 0)
-                                       delta-mult (- new-mult old-mult)]
-                                 :when (not= delta-mult 0)]
-                             {:binding binding :mult delta-mult})]
-
-                ;; Debug
-                (when (and (System/getProperty "dfdb.debug.agg") (seq deltas))
-                  (println "DELTAS:" (count deltas) "first few:" (take 3 deltas)))
-
-                ;; Process each delta through aggregate operator
-                (doseq [delta deltas]
-                  (let [agg-deltas (core/process-delta agg-op delta)]
-                    ;; Feed aggregate deltas to collect
-                    (doseq [agg-delta agg-deltas]
-                      (core/process-delta collect-agg agg-delta)))))))
+            ;; Process captured deltas through aggregate operators
+            ;; These are raw pattern/join result deltas - no multiset diff overhead
+            (doseq [delta @delta-stream]
+              (let [agg-deltas (core/process-delta agg-op delta)]
+                (doseq [agg-delta agg-deltas]
+                  (core/process-delta collect-agg agg-delta)))))
 
           :get-results
           (fn [] (core/get-results collect-agg))
@@ -337,7 +319,7 @@
           :all-pattern-vars all-pattern-vars
           :agg-op agg-op
           :group-vars group-vars
-          :extract-agg-results extract-agg-results
+          :delta-stream delta-stream
           :operators {:collect collect-agg}})
 
       ;; Pure patterns with optional predicates and/or NOT clauses
@@ -376,7 +358,7 @@
         ;; Build pipeline for NOT pattern to track what matches
         not-pipeline (mp/make-multi-pattern-pipeline [not-pattern] [])
 
-        filtered-collect (core/->CollectResults {:accumulated (atom {})})]
+        filtered-collect (core/->CollectResults {:accumulated (atom {})} nil)]
 
     (if not-pipeline
       {:process-deltas

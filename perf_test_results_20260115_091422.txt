@@ -1,0 +1,589 @@
+
+Running tests in #{"perf"}
+
+Testing dfdb.joins-aggregates-performance-test
+
+ ======================================================================
+Self-Join: Mutual friendship detection
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 25.22ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 2.06ms
+Naive avg: 3.08ms
+Speedup: 1.5x
+Results match: true
+
+ ======================================================================
+3-Way Join: Friend³
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 14.39ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 1.56ms
+Naive avg: 3.92ms
+Speedup: 2.5x
+Results match: true
+
+ ======================================================================
+Complex Aggregate: Count, Sum, Avg by type
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 54.69ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 24.85ms
+Naive avg: 15.27ms
+Speedup: 0.6x
+Results match: true
+
+FAIL in (test-complex-aggregation) (joins_aggregates_performance_test.clj:354)
+Complex Aggregation: Multiple aggregates with grouping
+expected: (> (:speedup result) 1.0)
+  actual: (not (> 1526858619/2484828925 1.0))
+
+ ======================================================================
+Hierarchical: 3-level management chain
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 4.30ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 1.22ms
+Naive avg: 1.39ms
+Speedup: 1.1x
+Results match: true
+
+FAIL in (test-manager-chain) (joins_aggregates_performance_test.clj:339)
+Hierarchical Join: Employee → Manager → Skip-Level
+expected: (> (:speedup result) 1.5)
+  actual: (not (> 69260002/61087209 1.5))
+
+ ======================================================================
+Join + Aggregate: Sum by account type
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 39.99ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 12.91ms
+Naive avg: 10.55ms
+Speedup: 0.8x
+Results match: true
+
+FAIL in (test-join-plus-aggregate) (joins_aggregates_performance_test.clj:306)
+Join + Aggregate: Total amount by account type
+expected: (> (:speedup result) 1.5)
+  actual: (not (> 1054869332/1290589125 1.5))
+
+ ======================================================================
+Triangle Join: A→B, B→C, A→C
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 9.71ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 1.45ms
+Naive avg: 2.68ms
+Speedup: 1.9x
+Results match: true
+
+FAIL in (test-triangle-join) (joins_aggregates_performance_test.clj:368)
+Triangle Join: Transitive closure pattern
+expected: (> (:speedup result) 2.0)
+  actual: (not (> 80469503/43409039 2.0))
+
+ ======================================================================
+Aggregation: Count transactions by type
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 5.27ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 6.18ms
+Naive avg: 1.73ms
+Speedup: 0.3x
+Results match: true
+
+ ======================================================================
+Star Schema: 4-way join on users
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 23.25ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 4.63ms
+Naive avg: 7.03ms
+Speedup: 1.5x
+Results match: true
+
+ ======================================================================
+Filtered Aggregate: Sum of high-value by type
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 19.24ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 11.29ms
+Naive avg: 7.62ms
+Speedup: 0.7x
+Results match: true
+
+ ======================================================================
+4-Way Join: Friend⁴
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 15.30ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 2.26ms
+Naive avg: 5.17ms
+Speedup: 2.3x
+Results match: true
+
+ ======================================================================
+Multi-Join Aggregate: Orders by city + status
+======================================================================
+Loading initial data...
+Creating subscription...
+Compilation time: 104.63ms
+
+Running subscription updates...
+Running naive query re-executions...
+
+--- Results ---
+Subscription avg: 17.04ms
+Naive avg: 29.86ms
+Speedup: 1.8x
+Results match: true
+
+FAIL in (test-multi-join-aggregate) (joins_aggregates_performance_test.clj:324)
+Multi-Join + Aggregate: Orders by city and status
+expected: (> (:speedup result) 2.0)
+  actual: (not (> 1492920871/852165895 2.0))
+
+Testing dfdb.performance-smoke-test
+
+Testing dfdb.performance-test
+
+ ================================================================================
+Scenario: High-Churn - Active Sessions
+Scale: 500 users, 2000 sessions
+Updates: 200
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 160.72 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 23.81 ms
+Subscription active. Initial results delivered.
+Initial result count: 0
+
+--- Generating Updates ---
+Generated 200 update batches
+
+--- Subscription Benchmark ---
+Completed 200 updates via subscription
+Stats: mean: 11.50ms, p50: 10.69ms, p95: 14.10ms, p99: 22.88ms, min: 9.73ms, max: 88.83ms
+Total time: 2300.97 ms
+Throughput: 86.92 updates/sec
+Memory delta: 620.76 MB
+
+--- Naive Query Benchmark ---
+Completed 200 updates with naive queries
+Stats: mean: 7.64ms, p50: 7.61ms, p95: 8.33ms, p99: 8.87ms, min: 7.09ms, max: 9.37ms
+Total time: 1527.88 ms
+Throughput: 130.90 updates/sec
+Memory delta: -1375.88 MB
+
+--- Results Validation ---
+Subscription final result count: 0
+Naive query final result count: 0
+Results match: true
+
+--- Summary ---
+Speedup: 0.7x
+Subscription avg latency: 11.50 ms
+Naive query avg latency: 7.64 ms
+
+FAIL in (scenario-4-high-churn-sessions) (performance_test.clj:441)
+High-Churn: Active User Sessions
+Subscriptions should be faster for high-churn workloads
+expected: (> (:speedup results) 1.0)
+  actual: (not (> 0.664017171885856 1.0))
+
+ ================================================================================
+Scenario: Micro Updates (1-5 datoms)
+Scale: 1000 products, micro updates
+Updates: 50
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 537.60 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 6.61 ms
+Subscription active. Initial results delivered.
+Initial result count: 205
+
+--- Generating Updates ---
+Generated 50 update batches
+
+--- Subscription Benchmark ---
+Completed 50 updates via subscription
+Stats: mean: 4.16ms, p50: 4.04ms, p95: 4.64ms, p99: 4.92ms, min: 3.80ms, max: 4.92ms
+Total time: 208.00 ms
+Throughput: 240.38 updates/sec
+Memory delta: 301.00 MB
+
+--- Naive Query Benchmark ---
+Completed 50 updates with naive queries
+Stats: mean: 2.71ms, p50: 2.70ms, p95: 2.87ms, p99: 3.19ms, min: 2.61ms, max: 3.19ms
+Total time: 135.58 ms
+Throughput: 368.79 updates/sec
+Memory delta: 606.00 MB
+
+--- Results Validation ---
+Subscription final result count: 204
+Naive query final result count: 204
+Results match: true
+
+--- Summary ---
+Speedup: 0.7x
+Subscription avg latency: 4.16 ms
+Naive query avg latency: 2.71 ms
+
+ ================================================================================
+Scenario: Social Network - Large Scale
+Scale: 5000 users, avg 20 friends
+Updates: 100
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 2202.78 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 7308.91 ms
+Subscription active. Initial results delivered.
+Initial result count: 5000
+
+--- Generating Updates ---
+Generated 100 update batches
+
+--- Subscription Benchmark ---
+Completed 100 updates via subscription
+Stats: mean: 269.29ms, p50: 268.81ms, p95: 292.02ms, p99: 311.45ms, min: 215.54ms, max: 311.45ms
+Total time: 26928.87 ms
+Throughput: 3.71 updates/sec
+Memory delta: 144.56 MB
+
+--- Naive Query Benchmark ---
+Completed 100 updates with naive queries
+Stats: mean: 3545.45ms, p50: 3388.64ms, p95: 4608.15ms, p99: 7610.71ms, min: 2849.21ms, max: 7610.71ms
+Total time: 354544.99 ms
+Throughput: 0.28 updates/sec
+Memory delta: 883.06 MB
+
+--- Results Validation ---
+Subscription final result count: 5000
+Naive query final result count: 5000
+Results match: true
+
+--- Summary ---
+Speedup: 13.2x
+Subscription avg latency: 269.29 ms
+Naive query avg latency: 3545.45 ms
+
+ ================================================================================
+Scenario: Social Network - Friend Recommendations
+Scale: 500 users, avg 8 friends
+Updates: 50
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 1342.00 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 170.31 ms
+Subscription active. Initial results delivered.
+Initial result count: 498
+
+--- Generating Updates ---
+Generated 50 update batches
+
+--- Subscription Benchmark ---
+Completed 50 updates via subscription
+Stats: mean: 103.87ms, p50: 98.64ms, p95: 140.39ms, p99: 151.75ms, min: 82.00ms, max: 151.75ms
+Total time: 5193.64 ms
+Throughput: 9.63 updates/sec
+Memory delta: -1309.74 MB
+
+--- Naive Query Benchmark ---
+Completed 50 updates with naive queries
+Stats: mean: 61.42ms, p50: 57.21ms, p95: 89.14ms, p99: 106.74ms, min: 47.38ms, max: 106.74ms
+Total time: 3070.78 ms
+Throughput: 16.28 updates/sec
+Memory delta: 858.47 MB
+
+--- Results Validation ---
+Subscription final result count: 498
+Naive query final result count: 498
+Results match: true
+
+--- Summary ---
+Speedup: 0.6x
+Subscription avg latency: 103.87 ms
+Naive query avg latency: 61.42 ms
+
+FAIL in (scenario-1-social-network) (performance_test.clj:358)
+Social Network: Friend Recommendations (Friends of Friends)
+Subscriptions should be faster for multi-join queries
+expected: (> (:speedup results) 1.0)
+  actual: (not (> 0.5912564099909329 1.0))
+
+ ================================================================================
+Scenario: E-commerce - Low Price In-Stock Products
+Scale: 5000 products
+Updates: 100
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 1561.74 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 195.57 ms
+Subscription active. Initial results delivered.
+Initial result count: 961
+
+--- Generating Updates ---
+Generated 100 update batches
+
+--- Subscription Benchmark ---
+Completed 100 updates via subscription
+Stats: mean: 37.86ms, p50: 33.23ms, p95: 58.02ms, p99: 118.88ms, min: 27.33ms, max: 118.88ms
+Total time: 3786.13 ms
+Throughput: 26.41 updates/sec
+Memory delta: 437.18 MB
+
+--- Naive Query Benchmark ---
+Completed 100 updates with naive queries
+Stats: mean: 47.29ms, p50: 43.51ms, p95: 76.20ms, p99: 87.69ms, min: 32.25ms, max: 87.69ms
+Total time: 4728.54 ms
+Throughput: 21.15 updates/sec
+Memory delta: -2193.01 MB
+
+--- Results Validation ---
+Subscription final result count: 962
+Naive query final result count: 962
+Results match: true
+
+--- Summary ---
+Speedup: 1.2x
+Subscription avg latency: 37.86 ms
+Naive query avg latency: 47.29 ms
+
+ ================================================================================
+Scenario: Bulk Updates (50-100 datoms)
+Scale: 1000 products, bulk updates
+Updates: 20
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 546.75 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 8.73 ms
+Subscription active. Initial results delivered.
+Initial result count: 192
+
+--- Generating Updates ---
+Generated 20 update batches
+
+--- Subscription Benchmark ---
+Completed 20 updates via subscription
+Stats: mean: 283.38ms, p50: 280.90ms, p95: 449.31ms, p99: 449.31ms, min: 170.44ms, max: 449.31ms
+Total time: 5667.56 ms
+Throughput: 3.53 updates/sec
+Memory delta: 1861.86 MB
+
+--- Naive Query Benchmark ---
+Completed 20 updates with naive queries
+Stats: mean: 9.44ms, p50: 6.77ms, p95: 39.47ms, p99: 39.47ms, min: 4.83ms, max: 39.47ms
+Total time: 188.81 ms
+Throughput: 105.93 updates/sec
+Memory delta: 1161.84 MB
+
+--- Results Validation ---
+Subscription final result count: 197
+Naive query final result count: 196
+Results match: false
+ERROR: Results do not match!
+Subscription only: #{[902 38]}
+Naive only: #{}
+
+--- Summary ---
+Speedup: 0.0x
+Subscription avg latency: 283.38 ms
+Naive query avg latency: 9.44 ms
+
+FAIL in (scenario-batch-bulk-updates) (performance_test.clj:540)
+Batch Size: Bulk Updates (50-100 datoms)
+expected: (:results-match? results)
+  actual: false
+
+ ================================================================================
+Scenario: Analytics - Sales by Category
+Scale: 1000 products, 5000 initial orders
+Updates: 50
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 180.90 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 401.98 ms
+Subscription active. Initial results delivered.
+Initial result count: 5
+
+--- Generating Updates ---
+Generated 50 update batches
+
+--- Subscription Benchmark ---
+Completed 50 updates via subscription
+Stats: mean: 63.99ms, p50: 65.14ms, p95: 107.11ms, p99: 143.57ms, min: 37.91ms, max: 143.57ms
+Total time: 3199.36 ms
+Throughput: 15.63 updates/sec
+Memory delta: 916.06 MB
+
+--- Naive Query Benchmark ---
+Completed 50 updates with naive queries
+Stats: mean: 71.54ms, p50: 68.34ms, p95: 99.57ms, p99: 138.33ms, min: 49.45ms, max: 138.33ms
+Total time: 3577.11 ms
+Throughput: 13.98 updates/sec
+Memory delta: 1209.18 MB
+
+--- Results Validation ---
+Subscription final result count: 5
+Naive query final result count: 5
+Results match: true
+
+--- Summary ---
+Speedup: 1.1x
+Subscription avg latency: 63.99 ms
+Naive query avg latency: 71.54 ms
+
+ ================================================================================
+Scenario: Social Network - Small Scale
+Scale: 100 users, avg 5 friends
+Updates: 50
+================================================================================
+
+Setting up initial data...
+Initial data loaded
+Initial memory usage: 1686.50 MB
+
+Warming up JVM...
+
+--- Subscription Setup ---
+Compilation time: 14.89 ms
+Subscription active. Initial results delivered.
+Initial result count: 99
+
+--- Generating Updates ---
+Generated 50 update batches
+
+--- Subscription Benchmark ---
+Completed 50 updates via subscription
+Stats: mean: 112.92ms, p50: 105.67ms, p95: 212.67ms, p99: 253.41ms, min: 11.15ms, max: 253.41ms
+Total time: 5646.24 ms
+Throughput: 8.86 updates/sec
+Memory delta: 307.50 MB
+
+--- Naive Query Benchmark ---
+Completed 50 updates with naive queries
+Stats: mean: 7.38ms, p50: 6.95ms, p95: 10.46ms, p99: 19.09ms, min: 5.07ms, max: 19.09ms
+Total time: 369.06 ms
+Throughput: 135.48 updates/sec
+Memory delta: -1722.88 MB
+
+--- Results Validation ---
+Subscription final result count: 100
+Naive query final result count: 100
+Results match: true
+
+--- Summary ---
+Speedup: 0.1x
+Subscription avg latency: 112.92 ms
+Naive query avg latency: 7.38 ms
+
+Ran 22 tests containing 35 assertions.
+8 failures, 0 errors.
+Execution error (ExceptionInfo) at cognitect.test-runner.api/test (api.clj:30).
+Test failures or errors occurred.
+
+Full report at:
+/var/folders/34/gnyxj28j4t9cyq61bzdz2b9w0000gp/T/clojure-3126304760663059224.edn

@@ -56,15 +56,16 @@
 (defn make-multi-pattern-pipeline
   "Create DD pipeline for multi-pattern query with optional predicate filters.
   Returns pipeline or nil if unsupported."
-  ([patterns find-vars] (make-multi-pattern-pipeline patterns find-vars []))
-  ([patterns find-vars predicate-filters]
+  ([patterns find-vars] (make-multi-pattern-pipeline patterns find-vars [] nil))
+  ([patterns find-vars predicate-filters] (make-multi-pattern-pipeline patterns find-vars predicate-filters nil))
+  ([patterns find-vars predicate-filters delta-callback]
 
    ;; Only compile pure pattern queries (no predicates in pattern list)
    (when (every? pattern-clause? patterns)
      (cond
       ;; Single pattern
        (= 1 (count patterns))
-       (core/make-pattern-pipeline (first patterns) find-vars predicate-filters)
+       (core/make-pattern-pipeline (first patterns) find-vars predicate-filters delta-callback)
 
       ;; Exactly two patterns - simple join
        (= 2 (count patterns))
@@ -88,7 +89,7 @@
                                        predicate-filters)))
 
              project-op (core/->ProjectOperator find-vars (atom {}))
-             collect-op (core/->CollectResults {:accumulated (atom {})})]
+             collect-op (core/->CollectResults {:accumulated (atom {})} delta-callback)]
 
          {:process-deltas
           (fn [tx-deltas]
@@ -157,7 +158,7 @@
                                        predicate-filters)))
 
              project-op (core/->ProjectOperator find-vars (atom {}))
-             collect-op (core/->CollectResults {:accumulated (atom {})})]
+             collect-op (core/->CollectResults {:accumulated (atom {})} delta-callback)]
 
          {:process-deltas
           (fn [tx-deltas]

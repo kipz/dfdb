@@ -75,8 +75,9 @@
         [delta]
         []))))
 
-(defrecord CollectResults [state]
+(defrecord CollectResults [state delta-callback]
   ;; Accumulates deltas into final result set
+  ;; delta-callback: optional (fn [delta] ...) called for each processed delta
 
   DeltaOperator
   (process-delta [_this delta]
@@ -84,6 +85,8 @@
           mult (:mult delta)]
       ;; Update accumulated state
       (swap! (:accumulated state) update value (fnil + 0) mult)
+      ;; Emit delta to callback if present
+      (when delta-callback (delta-callback delta))
       ;; Return empty - this is terminal
       []))
 
@@ -103,13 +106,14 @@
 (defn make-pattern-pipeline
   "Create operator pipeline for single-pattern query.
   Returns {:process-deltas-fn get-results-fn}."
-  ([pattern find-vars] (make-pattern-pipeline pattern find-vars []))
-  ([pattern find-vars predicate-filters]
+  ([pattern find-vars] (make-pattern-pipeline pattern find-vars [] nil))
+  ([pattern find-vars predicate-filters] (make-pattern-pipeline pattern find-vars predicate-filters nil))
+  ([pattern find-vars predicate-filters delta-callback]
 
    (let [;; Create operators
          pattern-op (->PatternOperator pattern (atom {}))
          project-op (->ProjectOperator find-vars (atom {}))
-         collect-op (->CollectResults {:accumulated (atom {})})
+         collect-op (->CollectResults {:accumulated (atom {})} delta-callback)
 
          ;; Helper to apply predicate filters to deltas
          apply-filters (fn [deltas]

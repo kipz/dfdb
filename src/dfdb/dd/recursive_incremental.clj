@@ -80,7 +80,7 @@
         closure (atom {})  ; {from -> #{reachable ...}}
 
         project-op (core/->ProjectOperator find-vars (atom {}))
-        collect-op (core/->CollectResults {:accumulated (atom {})})]
+        collect-op (core/->CollectResults {:accumulated (atom {})} nil)]
 
     ;; Initialize from database
     (let [all-edges (index/scan-aevt (:storage db) [:aevt base-attr] [:aevt (index/successor-value base-attr)])]
