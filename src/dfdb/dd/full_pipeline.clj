@@ -1,9 +1,10 @@
 (ns dfdb.dd.full-pipeline
   "Complete DD pipeline for ALL Datalog query types - NO fallback."
-  (:require [dfdb.dd.delta-core :as delta]
+  (:require [clojure.set]
+            [dfdb.dd.delta-core :as delta]
             [dfdb.dd.incremental-core :as core]
             [dfdb.dd.multipattern :as mp]
-            [dfdb.dd.aggregate :as agg]
+            [dfdb.dd.incremental-aggregate :as inc-agg]
             [dfdb.dd.multiset :as ms]
             [dfdb.dd.operator :as op]
             [dfdb.dd.recursive-incremental :as rec]
@@ -82,13 +83,107 @@
          not-clauses (filter not-clause? where)]
 
      (cond
-       ;; Recursive patterns
+       ;; Recursive patterns WITH aggregates - two-phase execution
+       (and (seq recursive-patterns) (seq aggregates))
+       (when db
+         ;; Phase 1: Compute recursive closure (returns all matching paths)
+         ;; Phase 2: Apply aggregates to closure results
+         ;; This is NOT fully incremental but it works correctly
+         (let [;; For recursive+aggregate, we need to determine what variables are in the results
+               ;; The recursive pipeline returns ALL variables from ALL patterns
+               all-pattern-vars (distinct (mapcat (fn [pattern]
+                                                    (filter #(and (symbol? %) (.startsWith ^String (name %) "?")) pattern))
+                                                  where))
+
+               recursive-pipeline (rec/make-recursive-pipeline db where all-pattern-vars)
+
+               ;; Variables used in aggregates
+               agg-vars (distinct (map (fn [agg-expr] (last agg-expr)) aggregates))
+
+               ;; all-vars for recursive results = all pattern variables
+               all-vars all-pattern-vars
+               result-vars (vec (concat group-vars agg-vars))
+
+               group-fn-delta (if (seq group-vars)
+                                (fn [binding]
+                                  (vec (take (count group-vars) binding)))
+                                (constantly :all))
+
+               ;; Build aggregate specs
+               agg-specs (vec
+                          (for [[agg-fn agg-var] aggregates]
+                            (let [var-idx (.indexOf ^java.util.List all-vars agg-var)
+                                  value-fn-delta (fn [binding]
+                                                   (nth binding var-idx))
+                                  agg-fn-name (if (list? agg-fn) (first agg-fn) agg-fn)
+                                  agg-fn-args (when (list? agg-fn) (rest agg-fn))]
+                              (case agg-fn-name
+                                count {:value-fn (constantly nil) :agg-fn inc-agg/inc-count :extract-fn identity}
+                                sum {:value-fn value-fn-delta :agg-fn inc-agg/inc-sum :extract-fn identity}
+                                avg {:value-fn value-fn-delta :agg-fn inc-agg/inc-avg :extract-fn :avg}
+                                min {:value-fn value-fn-delta :agg-fn inc-agg/inc-min :extract-fn :min}
+                                max {:value-fn value-fn-delta :agg-fn inc-agg/inc-max :extract-fn :max}
+                                count-distinct {:value-fn value-fn-delta :agg-fn inc-agg/inc-count-distinct :extract-fn :result}
+                                variance {:value-fn value-fn-delta :agg-fn inc-agg/inc-variance :extract-fn :result}
+                                stddev {:value-fn value-fn-delta :agg-fn inc-agg/inc-stddev :extract-fn :result}
+                                median {:value-fn value-fn-delta :agg-fn inc-agg/inc-median :extract-fn :result}
+                                collect {:value-fn value-fn-delta :agg-fn inc-agg/inc-collect :extract-fn :result}
+                                sample (let [k (first agg-fn-args)]
+                                         {:value-fn value-fn-delta
+                                          :agg-fn (fn [state value mult]
+                                                    (inc-agg/inc-sample state value mult k))
+                                          :extract-fn :result})
+                                rand {:value-fn value-fn-delta :agg-fn inc-agg/inc-rand :extract-fn :result}))))
+
+               agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
+               collect-agg (core/->CollectResults {:accumulated (atom {})})]
+
+           ;; Return combined pipeline
+           ;; NOTE: This recomputes aggregates from scratch each time
+           ;; Not fully incremental but ensures correctness for recursive+aggregate
+           {:process-deltas
+            (fn [tx-deltas]
+              ;; Phase 1: Process through recursive pipeline
+              ((:process-deltas recursive-pipeline) tx-deltas)
+
+              ;; Phase 2: Recompute ALL aggregates from scratch
+              ;; Query WITHOUT aggregates to get ALL current raw results
+              (let [raw-query (vec (concat [:find] all-pattern-vars [:where] where))
+                    raw-results (query/query db raw-query)]
+
+                ;; Create fresh aggregate operators
+                (let [fresh-agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
+                      fresh-collect (core/->CollectResults {:accumulated (atom {})})]
+
+                  ;; Feed ALL raw results through fresh aggregates
+                  (doseq [result raw-results]
+                    (let [result-delta (delta/make-delta result 1)
+                          agg-deltas (core/process-delta fresh-agg-op result-delta)]
+                      (doseq [agg-delta agg-deltas]
+                        (core/process-delta fresh-collect agg-delta))))
+
+                  ;; Replace collect-agg state with fresh results
+                  (reset! (:accumulated (:state collect-agg))
+                          @(:accumulated (:state fresh-collect))))))
+
+            :get-results
+            (fn [] (core/get-results collect-agg))
+
+            :recursive-pipeline recursive-pipeline
+            :agg-op agg-op
+            :all-pattern-vars all-pattern-vars
+            :where where
+            :db db
+            :group-fn-delta group-fn-delta
+            :agg-specs agg-specs
+            :operators {:collect collect-agg}}))
+
+       ;; Recursive patterns WITHOUT aggregates
        (seq recursive-patterns)
        (when db
-         ;; For now: handle simple case with recursive pattern
          (rec/make-recursive-pipeline db where find))
 
-       ;; Aggregates
+       ;; Aggregates WITHOUT recursive patterns
        (seq aggregates)
        (let [;; Get all variables used in ALL aggregate expressions
              agg-vars (distinct (map second aggregates))
@@ -123,108 +218,115 @@
                           (vec (take (count group-vars) tuple)))
                         (constantly :all))
 
-            ;; Create aggregate operators for each aggregate expression
-            ;; Each operates on the same grouping but different variables/aggregations
-             agg-ops (vec
-                      (for [[agg-fn agg-var] aggregates]
-                        (let [;; Find position of this var in all-vars
-                              var-idx (.indexOf ^java.util.List all-vars agg-var)
-                              ;; Extract value for this specific variable
-                              value-fn (fn [tuple] (nth tuple var-idx))
-                              ;; Wrap agg-fn to extract values from tuples
-                              tuple-agg-fn (case agg-fn
-                                             count agg/agg-count
-                                             sum (comp agg/agg-sum (partial map value-fn))
-                                             avg (comp agg/agg-avg (partial map value-fn))
-                                             min (comp agg/agg-min (partial map value-fn))
-                                             max (comp agg/agg-max (partial map value-fn)))]
-                          (agg/make-aggregate-operator group-fn tuple-agg-fn nil))))
+            ;; Create ONE MULTI-AGGREGATE operator that combines all aggregates
+            ;; Extract grouping key from binding (tuple)
+             group-fn-delta (if (seq group-vars)
+                             ;; First N elements are group vars
+                              (fn [binding]
+                                (vec (take (count group-vars) binding)))
+                              (constantly :all))
+
+            ;; Build agg-specs for multi-aggregate operator
+             agg-specs (vec
+                        (for [[agg-fn agg-var] aggregates]
+                          (let [;; Find position of this var in all-vars
+                                var-idx (.indexOf ^java.util.List all-vars agg-var)
+                               ;; Extract value for this specific variable from binding
+                                value-fn-delta (fn [binding] (nth binding var-idx))]
+
+                           ;; Create aggregate spec based on type
+                            ;; Handle aggregate functions with parameters (like sample)
+                            (let [agg-fn-name (if (list? agg-fn) (first agg-fn) agg-fn)
+                                  agg-fn-args (when (list? agg-fn) (rest agg-fn))]
+                              (case agg-fn-name
+                                count {:value-fn (constantly nil)
+                                       :agg-fn inc-agg/inc-count
+                                       :extract-fn identity}
+                                sum {:value-fn value-fn-delta
+                                     :agg-fn inc-agg/inc-sum
+                                     :extract-fn identity}
+                                avg {:value-fn value-fn-delta
+                                     :agg-fn inc-agg/inc-avg
+                                     :extract-fn :avg}
+                                min {:value-fn value-fn-delta
+                                     :agg-fn inc-agg/inc-min
+                                     :extract-fn :min}
+                                max {:value-fn value-fn-delta
+                                     :agg-fn inc-agg/inc-max
+                                     :extract-fn :max}
+                                ;; Advanced aggregates
+                                count-distinct {:value-fn value-fn-delta
+                                                :agg-fn inc-agg/inc-count-distinct
+                                                :extract-fn :result}
+                                variance {:value-fn value-fn-delta
+                                          :agg-fn inc-agg/inc-variance
+                                          :extract-fn :result}
+                                stddev {:value-fn value-fn-delta
+                                        :agg-fn inc-agg/inc-stddev
+                                        :extract-fn :result}
+                                median {:value-fn value-fn-delta
+                                        :agg-fn inc-agg/inc-median
+                                        :extract-fn :result}
+                                collect {:value-fn value-fn-delta
+                                         :agg-fn inc-agg/inc-collect
+                                         :extract-fn :result}
+                                sample (let [k (first agg-fn-args)]
+                                         {:value-fn value-fn-delta
+                                          :agg-fn (fn [state value mult]
+                                                    (inc-agg/inc-sample state value mult k))
+                                          :extract-fn :result})
+                                rand {:value-fn value-fn-delta
+                                      :agg-fn inc-agg/inc-rand
+                                      :extract-fn :result})))))
+
+            ;; Create the multi-aggregate operator
+             agg-op (inc-agg/make-multi-aggregate group-fn-delta agg-specs)
 
              collect-agg (core/->CollectResults {:accumulated (atom {})})
 
-            ;; Use a fixed timestamp for this aggregate pipeline (we don't need temporal versions)
-             current-timestamp (atom 0)
-
-         ;; Helper to extract current aggregate results from operators
+         ;; Helper to extract current aggregate results from collect operator
+         ;; With incremental aggregates, results are stored in collect-agg
              extract-agg-results (fn []
-                                   (let [ts @current-timestamp
-                                         first-agg-state @(:aggregates (:state (first agg-ops)))
-                                         all-timestamps (keys first-agg-state)
-                                         _ (when (> (count all-timestamps) 1)
-                                             (println "WARNING: Multiple timestamps in aggregate state:" all-timestamps))
-                                         first-aggregates (get first-agg-state ts)]
-                                     (when first-aggregates
-                                       (set
-                                        (for [group-key (keys first-aggregates)]
-                                          (let [agg-values (vec
-                                                            (for [agg-op agg-ops]
-                                                              (let [state @(:aggregates (:state agg-op))
-                                                                    aggs (get state ts)]
-                                                                (get aggs group-key))))]
-                                            (if (= :all group-key)
-                                              agg-values
-                                              (vec (concat group-key agg-values)))))))))]
+                                   (core/get-results collect-agg))]
 
          {:process-deltas
           (fn [tx-deltas]
-           ;; Get current aggregate results BEFORE processing
-            (let [old-results (or (extract-agg-results) #{})]
+            ;; NEW DELTA-BASED APPROACH:
+            ;; Work with MULTISETS (with multiplicities) to handle duplicate tuples correctly
+            ;; Critical for aggregates where [1 100000] can appear multiple times
 
-             ;; Process through base
+            ;; Get old accumulated multiset BEFORE processing
+            (let [base-ops (:operators base)
+                  base-collect (:collect base-ops)
+                  old-accumulated (or (when base-collect @(:accumulated (:state base-collect))) {})]
+
+              ;; Process through base pipeline
               ((:process-deltas base) tx-deltas)
 
-             ;; Get intermediate results (tuples) with multiplicities preserved
-              (let [;; For aggregates, we need to preserve multiplicities from base CollectResults
-                    ;; Don't use get-results which collapses multiplicities via set conversion
-                    base-accumulated (when-let [base-ops (:operators base)]
-                                       (when-let [collect (:collect base-ops)]
-                                         @(:accumulated (:state collect))))
-                    ;; Use accumulated map directly as multiset
-                    ms (if base-accumulated
-                         (ms/multiset base-accumulated)
-                         ;; Fallback to get-results for non-join cases
-                         (let [intermediate ((:get-results base))]
-                           (ms/multiset (into {} (map (fn [v] [v 1]) intermediate)))))]
+              ;; Get new accumulated multiset AFTER processing
+              (let [new-accumulated (or (when base-collect @(:accumulated (:state base-collect))) {})
 
-               ;; Feed to ALL aggregate operators with consistent timestamp
-                (let [ts @current-timestamp]
-                  (doseq [agg-op agg-ops]
-                    (op/input agg-op ms ts)))
+                    ;; Compute differential at multiset level
+                    ;; For each binding, check if multiplicity changed
+                    all-bindings (set (concat (keys old-accumulated) (keys new-accumulated)))
 
-               ;; Get new aggregate results AFTER processing
-                (let [new-results (or (extract-agg-results) #{})
+                    deltas (for [binding all-bindings
+                                 :let [old-mult (get old-accumulated binding 0)
+                                       new-mult (get new-accumulated binding 0)
+                                       delta-mult (- new-mult old-mult)]
+                                 :when (not= delta-mult 0)]
+                             {:binding binding :mult delta-mult})]
 
-                      ;; Compute differential
-                      additions (clojure.set/difference new-results old-results)
-                      retractions (clojure.set/difference old-results new-results)
+                ;; Debug
+                (when (and (System/getProperty "dfdb.debug.agg") (seq deltas))
+                  (println "DELTAS:" (count deltas) "first few:" (take 3 deltas)))
 
-                      ;; Debug if there are changes but no retractions (unexpected for aggregates)
-                      _ (when (and (seq additions) (empty? retractions) (seq old-results))
-                          (println "WARNING: Additions without retractions!")
-                          (println "  old-results:" old-results)
-                          (println "  new-results:" new-results)
-                          (println "  additions:" additions))]
-
-                 ;; Feed differential to collect operator
-                  ;; Debug: check if retractions exist in collect-agg
-                  (when (seq retractions)
-                    (let [collect-state @(:accumulated (:state collect-agg))
-                          missing-in-collect (filter (fn [r] (not (pos? (get collect-state r 0)))) retractions)]
-                      (when (seq missing-in-collect)
-                        (println "WARNING: Retracting values not in collect-agg:" missing-in-collect)
-                        (println "  Current collect-agg positive entries:"
-                                 (filter (fn [[k v]] (pos? v)) collect-state)))))
-
-                  (doseq [result retractions]
-                    ;; Defensive check: only retract if value exists in collect-agg
-                    (let [current-mult (get @(:accumulated (:state collect-agg)) result 0)]
-                      (when (pos? current-mult)
-                        (let [d (delta/make-delta result -1)]
-                          (core/process-delta collect-agg d)))))
-
-                  (doseq [result additions]
-                    (let [d (delta/make-delta result 1)]
-                      (core/process-delta collect-agg d)))))))
+                ;; Process each delta through aggregate operator
+                (doseq [delta deltas]
+                  (let [agg-deltas (core/process-delta agg-op delta)]
+                    ;; Feed aggregate deltas to collect
+                    (doseq [agg-delta agg-deltas]
+                      (core/process-delta collect-agg agg-delta)))))))
 
           :get-results
           (fn [] (core/get-results collect-agg))
@@ -233,7 +335,7 @@
           :all-vars all-vars
           :result-vars result-vars
           :all-pattern-vars all-pattern-vars
-          :agg-ops agg-ops
+          :agg-op agg-op
           :group-vars group-vars
           :extract-agg-results extract-agg-results
           :operators {:collect collect-agg}})
@@ -354,8 +456,25 @@
           parsed (query/parse-query query-form)
           where-clauses (:where parsed)
           patterns (filter pattern-clause? where-clauses)
+          recursive-patterns (filter recursive-pattern? where-clauses)
           predicates (filter predicate-clause? where-clauses)
           has-aggregates? (seq (:aggregates parsed))]
+
+      ;; Special case: Recursive + Aggregate
+      ;; Query WITHOUT aggregates to get raw results, then feed through aggregates
+      (when (and (seq recursive-patterns) has-aggregates?)
+        (when-let [all-pattern-vars (:all-pattern-vars dd-graph)]
+          (when-let [agg-op (:agg-op dd-graph)]
+            (when-let [collect-agg (get-in dd-graph [:operators :collect])]
+              ;; Build query without aggregates - just the where clause with all variables
+              (let [raw-query (vec (concat [:find] all-pattern-vars [:where] where-clauses))
+                    raw-results (query/query db raw-query)]
+                ;; Feed raw results through aggregate operator
+                (doseq [result raw-results]
+                  (let [result-delta (delta/make-delta result 1)
+                        agg-deltas (core/process-delta agg-op result-delta)]
+                    (doseq [agg-delta agg-deltas]
+                      (core/process-delta collect-agg agg-delta)))))))))
 
       ;; Populate join operator states for multi-pattern queries
       ;; This ensures incremental updates can join against existing state
@@ -520,11 +639,17 @@
                         raw-tuples-map (frequencies raw-tuples)]
                     (reset! base-accumulated-atom raw-tuples-map)
 
-                    ;; Feed raw tuples through aggregate operators to initialize them
-                    (when-let [agg-ops (get-in dd-graph [:agg-ops])]
-                      (let [ms (ms/multiset raw-tuples-map)]
-                        (doseq [agg-op agg-ops]
-                          (op/input agg-op ms 0)))))
+                    ;; Feed raw tuples through aggregate operator as DELTAS to initialize it
+                    (when-let [agg-op (get-in dd-graph [:agg-op])]
+                      ;; Convert raw tuples to deltas and feed through multi-aggregate operator
+                      (doseq [[binding mult] raw-tuples-map]
+                        (when (pos? mult)  ; Only positive multiplicities for initialization
+                          (let [base-delta (delta/make-delta binding mult)
+                                agg-deltas (core/process-delta agg-op base-delta)]
+                            ;; Feed aggregate deltas to collect operator
+                            (when-let [collect-agg (get-in dd-graph [:operators :collect])]
+                              (doseq [agg-delta agg-deltas]
+                                (core/process-delta collect-agg agg-delta))))))))
 
                     ;; Aggregate operators now initialized
                   (catch Exception e

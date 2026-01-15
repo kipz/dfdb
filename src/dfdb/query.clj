@@ -3,6 +3,8 @@
   (:require [dfdb.index :as index]
             [dfdb.temporal :as temporal]
             [dfdb.recursive :as recursive]
+            [dfdb.pull :as pull]
+            [dfdb.rules :as rules]
             [clojure.set :as set]))
 
 (set! *warn-on-reflection* true)
@@ -354,7 +356,28 @@
   "Process a single where clause (pattern or predicate)."
   [db clause bindings-set as-of-map]
   (cond
-    ;; Not clause: (not [pattern]) - CHECK THIS FIRST!
+    ;; not-join clause: (not-join [?vars...] pattern1 pattern2 ...)
+    (and (seq? clause) (= 'not-join (first clause)))
+    (let [join-vars (second clause)
+          not-patterns (drop 2 clause)
+          ;; Process NOT patterns to get all matches
+          matching (reduce (fn [acc-bindings not-pattern]
+                             (if (empty? acc-bindings)
+                               (match-pattern db not-pattern {} as-of-map)
+                               (set (mapcat (fn [bindings]
+                                              (match-pattern db not-pattern bindings as-of-map))
+                                            acc-bindings))))
+                           #{}
+                           not-patterns)
+          ;; Project to join variables for comparison
+          matching-projected (set (map #(select-keys % (set join-vars)) matching))
+          bindings-projected (set (map #(select-keys % (set join-vars)) bindings-set))]
+      ;; Keep bindings whose join-var projection is NOT in matching
+      (set (filter (fn [binding]
+                     (not (contains? matching-projected (select-keys binding (set join-vars)))))
+                   bindings-set)))
+
+    ;; Not clause: (not [pattern]) - basic NOT
     (and (seq? clause) (= 'not (first clause)))
     (let [not-pattern (second clause)
           matching (set (mapcat (fn [bindings]
@@ -366,6 +389,46 @@
                                (set (map #(select-keys % original-keys) matching))
                                matching)]
       (set/difference bindings-set matching-projected))
+
+    ;; or-join clause: (or-join [?vars...] pattern1 pattern2 ...)
+    (and (seq? clause) (= 'or-join (first clause)))
+    (let [join-vars (second clause)
+          or-branches (drop 2 clause)]
+      ;; Process each branch and union results, then join with outer bindings on join-vars
+      (let [or-results (reduce (fn [acc branch]
+                                 (let [branch-result (if (and (vector? branch) (vector? (first branch)))
+                                                     ;; Branch is a vector of multiple clauses (AND)
+                                                       (reduce (fn [branch-bindings branch-clause]
+                                                                 (process-where-clause db branch-clause branch-bindings as-of-map))
+                                                               #{}  ; Start fresh for each branch
+                                                               branch)
+                                                     ;; Branch is a single pattern
+                                                       (process-where-clause db branch #{} as-of-map))]
+                                  ;; Union with accumulated results
+                                   (set/union acc branch-result)))
+                               #{}
+                               or-branches)]
+        ;; Join OR results with outer bindings on join-vars
+        (join-bindings bindings-set or-results)))
+
+    ;; OR clause: (or clause1 clause2 ...) - simple OR without join vars
+    (and (seq? clause) (= 'or (first clause)))
+    (let [or-branches (rest clause)]
+      ;; Process each branch and union results
+      ;; Each branch can be a single pattern or a vector of patterns
+      (reduce (fn [acc branch]
+                (let [branch-result (if (and (vector? branch) (vector? (first branch)))
+                                     ;; Branch is a vector of multiple clauses
+                                      (reduce (fn [branch-bindings branch-clause]
+                                                (process-where-clause db branch-clause branch-bindings as-of-map))
+                                              bindings-set
+                                              branch)
+                                     ;; Branch is a single pattern
+                                      (process-where-clause db branch bindings-set as-of-map))]
+                  ;; Union with accumulated results
+                  (set/union acc branch-result)))
+              #{}
+              or-branches))
 
     ;; Predicate: [(> ?age 30)] - check before pattern
     (predicate-clause? clause)
@@ -400,7 +463,15 @@
   "Check if find expression is an aggregate like (count ?e)."
   [expr]
   (and (list? expr)
-       (contains? #{'count 'sum 'avg 'min 'max} (first expr))))
+       (contains? #{'count 'sum 'avg 'min 'max
+                    'count-distinct 'variance 'stddev 'median
+                    'collect 'sample 'rand} (first expr))))
+
+(defn pull-expr?
+  "Check if find expression is a pull like (pull ?e [*])."
+  [expr]
+  (and (list? expr)
+       (= 'pull (first expr))))
 
 (defn parse-query
   "Parse query form into components."
@@ -413,24 +484,50 @@
         find-exprs (subvec query-vec (inc find-idx) where-idx)
         where-clauses (subvec query-vec (inc where-idx))
 
-        ;; Separate aggregate from non-aggregate find expressions
+        ;; Separate aggregate, pull, and regular find expressions
         aggregates (filter aggregate? find-exprs)
-        group-vars (remove aggregate? find-exprs)]
+        pulls (filter pull-expr? find-exprs)
+        group-vars (remove #(or (aggregate? %) (pull-expr? %)) find-exprs)]
     {:find find-exprs
      :group-vars group-vars
      :aggregates aggregates
+     :pulls pulls
      :where where-clauses
      :as-of (when (map? query-form) (:as-of query-form))}))
 
 (defn apply-aggregate
   "Apply aggregate function to values."
   [agg-fn values]
-  (case agg-fn
-    count (count values)
-    sum (reduce + 0 values)
-    avg (if (empty? values) 0.0 (/ (reduce + 0 values) (double (count values))))
-    min (when (seq values) (apply min values))
-    max (when (seq values) (apply max values))))
+  (let [parameterized? (or (list? agg-fn) (vector? agg-fn))
+        agg-fn-name (if parameterized? (first agg-fn) agg-fn)
+        agg-fn-args (when parameterized? (rest agg-fn))]
+    (case agg-fn-name
+      count (count values)
+      sum (reduce + 0 values)
+      avg (if (empty? values) 0.0 (/ (reduce + 0 values) (double (count values))))
+      min (when (seq values) (apply min values))
+      max (when (seq values) (apply max values))
+      ;; Advanced aggregates (non-incremental fallback)
+      count-distinct (count (set values))
+      variance (if (< (count values) 1)
+                 0.0
+                 (let [mean (/ (reduce + 0 values) (double (count values)))
+                       sq-diffs (map #(Math/pow (- % mean) 2) values)]
+                   (/ (reduce + 0 sq-diffs) (double (count values)))))
+      stddev (Math/sqrt (apply-aggregate 'variance values))
+      median (let [sorted (vec (sort values))
+                   n (count sorted)]
+               (if (zero? n)
+                 nil
+                 (if (even? n)
+                   (/ (+ (nth sorted (/ n 2))
+                         (nth sorted (dec (/ n 2))))
+                      2.0)
+                   (double (nth sorted (quot n 2))))))
+      collect (vec values)
+      sample (let [k (first agg-fn-args)]
+               (vec (take k (shuffle values))))
+      rand (when (seq values) (rand-nth (vec values))))))
 
 (defn project-with-aggregates
   "Project bindings with aggregation support."
@@ -473,7 +570,14 @@
                               bindings-set))]
       (set (for [[group-key group-bindings] grouped]
              (let [agg-values (for [agg-expr aggregates]
-                                (let [[agg-fn var] agg-expr
+                                (let [;; Handle both (agg-fn var) and (agg-fn param... var)
+                                      agg-expr-seq (seq agg-expr)
+                                      agg-fn (if (> (count agg-expr-seq) 2)
+                                               ;; Parameterized like (sample 5 ?value) -> (sample 5)
+                                               (vec (take (dec (count agg-expr-seq)) agg-expr-seq))
+                                               ;; Simple like (count ?value) -> count
+                                               (first agg-expr-seq))
+                                      var (last agg-expr-seq)
                                       values (map #(get % var) group-bindings)
                                       result (apply-aggregate agg-fn values)]
                                   result))]
@@ -489,16 +593,47 @@
 (defn query
   "Execute Datalog query against database.
   Query form: [:find ?x ?y :where [?x :attr ?y]]
+  With rules: [:find ?x :in $ % :where (rule-name ?x)] and rules vector
   Or with map: {:query [:find ...] :as-of {...}}"
-  [db query-form]
-  (let [{:keys [find where as-of group-vars aggregates]} (parse-query query-form)
-        as-of-map (temporal/parse-as-of db as-of)
+  ([db query-form]
+   (query db query-form nil))
+  ([db query-form rules-vec]
+   (let [;; Expand rules if provided
+         expanded-query (if rules-vec
+                          (rules/compile-with-rules query-form rules-vec)
+                          query-form)
 
-        ;; Process all where clauses
-        bindings (reduce (fn [acc clause]
-                           (process-where-clause db clause acc as-of-map))
-                         #{}
-                         where)]
+         {:keys [find where as-of group-vars aggregates pulls]} (parse-query expanded-query)
+         as-of-map (temporal/parse-as-of db as-of)
 
-    ;; Project with or without aggregation
-    (project-with-aggregates bindings find group-vars aggregates)))
+         ;; Process all where clauses
+         bindings (reduce (fn [acc clause]
+                            (process-where-clause db clause acc as-of-map))
+                          #{}
+                          where)]
+
+     ;; Handle pull expressions
+     (if (seq pulls)
+      ;; Project with pull
+       (set (map (fn [binding-map]
+                   (vec (map (fn [expr]
+                               (cond
+                               ;; Pull expression: (pull ?e [...])
+                                 (pull-expr? expr)
+                                 (let [[_pull entity-var pattern] expr
+                                       entity-id (get binding-map entity-var)]
+                                   (when entity-id
+                                     (pull/pull db entity-id pattern)))
+
+                               ;; Variable
+                                 (variable? expr)
+                                 (get binding-map expr)
+
+                               ;; Constant
+                                 :else
+                                 expr))
+                             find)))
+                 bindings))
+
+      ;; No pull - use regular projection with or without aggregation
+       (project-with-aggregates bindings find group-vars aggregates)))))
