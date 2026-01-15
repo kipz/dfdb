@@ -36,28 +36,41 @@
   ([ms value]
    (add ms value 1))
   ([ms value multiplicity]
-   (Multiset. (update (.values ^Multiset ms) value (fnil + 0) multiplicity))))
+   (Multiset. (update ^clojure.lang.IPersistentMap (.values ^Multiset ms)
+                      value
+                      (fnil + 0)
+                      ^long multiplicity))))
 
 (defn remove-elem
   "Remove an element from multiset with given multiplicity (default 1)."
   ([ms value]
    (remove-elem ms value 1))
   ([ms value multiplicity]
-   (let [new-values (update (.values ^Multiset ms) value (fnil - 0) multiplicity)
+   (let [new-values (update ^clojure.lang.IPersistentMap (.values ^Multiset ms)
+                            value
+                            (fnil - 0)
+                            ^long multiplicity)
          ;; Remove entries with count <= 0
-         cleaned (into {} (filter (fn [[_k v]] (pos? v)) new-values))]
+         cleaned (into {} (filter (fn [[_k v]] (pos? ^long v)) new-values))]
      (Multiset. cleaned))))
 
 (defn get-count
   "Get multiplicity of value in multiset."
   [ms value]
-  (get (.values ^Multiset ms) value 0))
+  (get ^clojure.lang.IPersistentMap (.values ^Multiset ms) value 0))
 
 (defn merge-multisets
-  "Merge two multisets by adding multiplicities."
+  "Merge two multisets by adding multiplicities.
+  OPTIMIZED: Uses transient map for better performance."
   [ms1 ms2]
-  (Multiset.
-   (merge-with + (.values ^Multiset ms1) (.values ^Multiset ms2))))
+  (let [values1 ^clojure.lang.IPersistentMap (.values ^Multiset ms1)
+        values2 ^clojure.lang.IPersistentMap (.values ^Multiset ms2)]
+    (Multiset.
+     (persistent!
+      (reduce-kv (fn [acc k v]
+                   (assoc! acc k (+ (get acc k 0) ^long v)))
+                 (transient values1)
+                 values2)))))
 
 (defn empty-multiset
   "Create an empty multiset."

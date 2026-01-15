@@ -44,7 +44,7 @@
 (defn variable?
   "Check if symbol is a query variable (starts with ?)."
   [x]
-  (and (symbol? x) (.startsWith ^String (name x) "?")))
+  (and (symbol? x) (.startsWith ^String (name ^clojure.lang.Symbol x) "?")))
 
 (defn wildcard?
   "Check if symbol is a wildcard (_)."

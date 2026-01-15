@@ -62,7 +62,9 @@
 (defn entity-at
   "Get all attributes of entity e as-of time t and/or tx-id.
   Filters by both time and tx-id (whichever is more restrictive).
-  Returns map of {attribute -> value}."
+  Returns map of {attribute -> value}.
+
+  OPTIMIZED: Single-pass state machine instead of multiple map/filter/group-by passes."
   ([storage e t]
    (entity-at storage e t ##Inf))
   ([storage e t tx-id]
@@ -72,40 +74,54 @@
                    [:eavt (str e "\uFFFF")]
                    [:eavt (inc e)])
          datoms (storage/scan storage start-key end-key)]
-     (->> datoms
-          (map second)  ; get datom from [key datom] pair
-          (filter (fn [d] (and (<= (:t d) t)  ; wall-clock time constraint
-                               (<= (:tx-id d) tx-id))))  ; tx-id constraint
-          (group-by :a)  ; group by attribute
-          (mapcat (fn [[a ds]]
-                    ;; For each attribute, find what values are currently asserted
-                    ;; First, check absolute latest datom to detect retractions
-                    (let [sorted-all (sort datom-comparator ds)
-                          absolute-latest (first sorted-all)]
-
-                      (cond
-                        ;; If absolute latest is a retraction with nil value, attribute is empty
-                        (and (= :retract (:op absolute-latest))
-                             (nil? (:v absolute-latest)))
-                        []
-
-                        ;; Otherwise, find all currently asserted values
-                        :else
-                        (let [by-value (group-by :v ds)
-                              value-states (keep (fn [[v value-datoms]]
-                                                   (let [sorted (sort datom-comparator value-datoms)
-                                                         latest (first sorted)]
-                                                     (when (= :assert (:op latest))
-                                                       {:value v :tx-id (:tx-id latest)})))
-                                                 by-value)]
-                          ;; Take values from LATEST transaction
-                          (when (seq value-states)
-                            (let [latest-tx (apply max (map :tx-id value-states))
-                                  latest-values (map :value (filter #(= latest-tx (:tx-id %)) value-states))]
-                              (cond
-                                (> (count latest-values) 1) [[a (set latest-values)]]
-                                :else [[a (first latest-values)]]))))))))
-          (into {})))))
+     ;; Single-pass state machine: group by attribute and track latest values
+     (loop [items datoms
+            by-attr (transient {})]
+       (if-let [[_k datom] (first items)]
+         (if (and (<= (:t datom) t)
+                  (<= (:tx-id datom) tx-id))
+           (let [a (:a datom)
+                 current-attr (get by-attr a)]
+             ;; Track all datoms for this attribute
+             (recur (rest items)
+                    (assoc! by-attr a (conj (or current-attr []) datom))))
+           (recur (rest items) by-attr))
+         ;; Process accumulated datoms per attribute
+         (loop [attrs (seq (persistent! by-attr))
+                result (transient {})]
+           (if-let [[a ds] (first attrs)]
+             (let [sorted-all (sort datom-comparator ds)
+                   absolute-latest (first sorted-all)]
+               (if (and (= :retract (:op absolute-latest))
+                        (nil? (:v absolute-latest)))
+                 ;; Attribute fully retracted
+                 (recur (rest attrs) result)
+                 ;; Find latest asserted values
+                 (let [;; Group by value and find latest per value
+                       by-value (reduce (fn [acc d]
+                                          (let [v (:v d)]
+                                            (if-let [current (get acc v)]
+                                              (if (> (:tx-id d) (:tx-id current))
+                                                (assoc acc v d)
+                                                acc)
+                                              (assoc acc v d))))
+                                        {}
+                                        ds)
+                       ;; Keep only asserted values
+                       asserted (keep (fn [[v d]]
+                                        (when (= :assert (:op d))
+                                          {:value v :tx-id (:tx-id d)}))
+                                      by-value)]
+                   (if (seq asserted)
+                     (let [latest-tx (reduce max (map :tx-id asserted))
+                           latest-values (map :value (filter #(= latest-tx (:tx-id %)) asserted))]
+                       (recur (rest attrs)
+                              (assoc! result a
+                                      (if (> (count latest-values) 1)
+                                        (set latest-values)
+                                        (first latest-values)))))
+                     (recur (rest attrs) result)))))
+             (persistent! result))))))))
 
 (defn scan-eavt
   "Scan EAVT index from start to end pattern."
@@ -128,23 +144,36 @@
   (storage/scan storage start end))
 
 (defn attribute-values
-  "Get all values for attribute a as-of time t."
+  "Get all values for attribute a as-of time t.
+
+  OPTIMIZED: Single-pass with transient collections instead of multi-pass pipeline."
   [storage a t]
   (let [start-key [:aevt a]
         ;; Scan to next attribute in AEVT index
         end-key [:aevt (keyword (str (name a) "\uFFFF"))]
         datoms (storage/scan storage start-key end-key)]
-    (->> datoms
-         (map second)
-         (filter (fn [d] (and (= a (:a d)) (<= (:t d) t))))  ; filter by attribute and time
-         (group-by (fn [d] [(:e d) (:a d)]))  ; group by entity+attribute
-         (map (fn [[_ ds]]
-                (let [sorted (sort datom-comparator ds)
-                      latest (first sorted)]
-                  (when (= :assert (:op latest))
-                    latest))))
-         (filter some?)
-         (map :v))))
+    ;; Single pass: group by entity+attr and track latest
+    (loop [items datoms
+           by-ea (transient {})]
+      (if-let [[_k datom] (first items)]
+        (if (and (= a (:a datom)) (<= (:t datom) t))
+          (let [ea [(:e datom) (:a datom)]
+                current (get by-ea ea)]
+            ;; Keep datom with highest tx-id
+            (recur (rest items)
+                   (if (or (nil? current)
+                           (> (:tx-id datom) (:tx-id current)))
+                     (assoc! by-ea ea datom)
+                     by-ea)))
+          (recur (rest items) by-ea))
+        ;; Extract values from asserted datoms
+        (loop [entries (seq (persistent! by-ea))
+               result (transient [])]
+          (if-let [[_ea datom] (first entries)]
+            (if (= :assert (:op datom))
+              (recur (rest entries) (conj! result (:v datom)))
+              (recur (rest entries) result))
+            (persistent! result)))))))
 
 (defn successor-value
   "Get a value that is lexicographically after v for range scans."

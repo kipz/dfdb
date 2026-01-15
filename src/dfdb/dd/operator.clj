@@ -149,7 +149,7 @@
              (ms/merge-multisets current coll)))
     (swap! (:frontier-ts state) (fn [current]
                                   (if current
-                                    (max current timestamp)
+                                    (max ^long current ^long timestamp)
                                     timestamp))))
 
   (step [_this]

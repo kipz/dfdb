@@ -19,7 +19,7 @@
   value: the value (ignored for count)
   mult: delta multiplicity (+1 or -1)"
   [current _value mult]
-  (+ (or current 0) mult))
+  (+ ^long (or current 0) ^long mult))
 
 (defn inc-sum
   "Incrementally update sum aggregate.
@@ -27,7 +27,7 @@
   value: the value to add/subtract
   mult: delta multiplicity (+1 or -1)"
   [current value mult]
-  (+ (or current 0) (* value mult)))
+  (+ (or current 0) (* value ^long mult)))
 
 (defn inc-avg
   "Incrementally update average aggregate.
