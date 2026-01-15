@@ -405,32 +405,45 @@
           group-key (group-fn binding)]
 
       ;; Get old aggregate values (before update)
+      ;; OPTIMIZED: Use loop/recur to avoid mapv allocation
       (let [old-agg-states (get aggregates group-key)
             old-agg-values (when old-agg-states
-                             (mapv (fn [agg-state agg-spec]
-                                     ((:extract-fn agg-spec) agg-state))
-                                   old-agg-states
-                                   agg-specs))]
+                             (loop [idx 0
+                                    result (transient [])]
+                               (if (>= idx (count agg-specs))
+                                 (persistent! result)
+                                 (let [agg-spec (nth agg-specs idx)
+                                       agg-state (nth old-agg-states idx)
+                                       value ((:extract-fn agg-spec) agg-state)]
+                                   (recur (inc idx) (conj! result value))))))]
 
         ;; Update all aggregates for this group (direct mutation)
+        ;; OPTIMIZED: Use loop/recur instead of map-indexed to avoid intermediate allocations
         (set! aggregates (update aggregates group-key
                                  (fn [current-states]
-                                   (vec
-                                    (map-indexed
-                                     (fn [idx agg-spec]
-                                       (let [current-state (when current-states (nth current-states idx nil))
+                                   (loop [idx 0
+                                          result (transient [])]
+                                     (if (>= idx (count agg-specs))
+                                       (persistent! result)
+                                       (let [agg-spec (nth agg-specs idx)
+                                             current-state (when current-states (nth current-states idx nil))
                                              value ((:value-fn agg-spec) binding)
-                                             agg-fn (:agg-fn agg-spec)]
-                                         (agg-fn current-state value mult)))
-                                     agg-specs)))))
+                                             agg-fn (:agg-fn agg-spec)
+                                             new-state (agg-fn current-state value mult)]
+                                         (recur (inc idx) (conj! result new-state))))))))
 
         ;; Get new aggregate values (after update)
+        ;; OPTIMIZED: Use loop/recur to avoid mapv allocation
         (let [new-agg-states (get aggregates group-key)
               new-agg-values (when new-agg-states
-                               (mapv (fn [agg-state agg-spec]
-                                       ((:extract-fn agg-spec) agg-state))
-                                     new-agg-states
-                                     agg-specs))]
+                               (loop [idx 0
+                                      result (transient [])]
+                                 (if (>= idx (count agg-specs))
+                                   (persistent! result)
+                                   (let [agg-spec (nth agg-specs idx)
+                                         agg-state (nth new-agg-states idx)
+                                         value ((:extract-fn agg-spec) agg-state)]
+                                     (recur (inc idx) (conj! result value))))))]
 
           ;; Emit deltas for the change
           (cond
