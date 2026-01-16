@@ -1,4 +1,4 @@
-# When createing clojure code:
+# When creating clojure code:
 * Avoid atoms to hold state where possible (prefer reduce and other accumulators)
 * Use the clojure repl for experiments, putting files in sandbox/
 * Use docs/ for markdown files you generate
