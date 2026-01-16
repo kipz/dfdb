@@ -55,6 +55,13 @@ dfdb builds on the foundation of these excellent projects:
 - All incremental with O(1) or O(log n) updates
 - Full Datomic aggregate compatibility
 
+### Pluggable Storage Backends
+- **Protocol-based architecture**: Clean Storage protocol for custom backends
+- **In-memory storage**: Default fast in-memory backend
+- **RocksDB support**: Durable storage with [RocksDB](https://github.com/kipz/dfdb/blob/main/src/dfdb/storage/rocksdb.clj)
+- Streaming scans and lifecycle management
+- Easy backend switching for testing and production
+
 ---
 
 ## 🚀 Usage
@@ -66,6 +73,11 @@ dfdb builds on the foundation of these excellent projects:
 (def db (create-db))
 (transact! db [{:user/name "Alice" :user/age 30}])
 (query db '[:find ?name (avg ?age) :where [?e :name ?name] [?e :age ?age]])
+
+;; Using RocksDB storage backend
+(require '[dfdb.storage.rocksdb :as rocksdb])
+(def db (create-db {:storage (rocksdb/create-rocksdb-storage "/path/to/db")}))
+(transact! db [{:user/name "Alice" :user/age 30}])
 
 ;; Collection operations
 (transact! db [[:db/assoc [:user/id 1] :settings :theme "dark"]])
